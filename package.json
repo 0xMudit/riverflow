@@ -1,0 +1,39 @@
+{
+  "name": "river",
+  "version": "0.2.0",
+  "private": true,
+  "description": "A peer-to-peer social network whose ledger forgets nothing.",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "start": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "demo": "tsx scripts/two-nodes.ts",
+    "test": "tsx scripts/test-core.ts",
+    "peer": "tsx scripts/peer.ts",
+    "drive": "node scripts/drive.mjs",
+    "preview:web": "vite --config vite.preview.config.ts"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^3.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "44.3.0",
+    "electron-vite": "^6.0.0",
+    "playwright-core": "^1.64.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.4"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.2": true
+  }
+}

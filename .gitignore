@@ -1,0 +1,13 @@
+node_modules
+out
+dist
+*.tsbuildinfo
+.env*.local
+
+# Runtime state: keys, logs, databases. Never commit these.
+data/
+shots/
+
+# The original browser prototype, kept for reference.
+prototype-web/node_modules
+prototype-web/.next
