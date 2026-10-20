@@ -5,8 +5,10 @@
  *   npm test
  */
 import { rm } from "node:fs/promises";
+import { mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { generateKeyPair, sign, verify, type KeyPair } from "../src/core/crypto";
 import { fromHex, toHex } from "../src/core/canonical";
 import { createEvent, eventId } from "../src/core/events";
@@ -404,6 +406,63 @@ async function main() {
   const rest = decoder.push('ng","at":9}\n');
   check("the rest arrives later", rest.messages.length === 1);
   check("junk is dropped, not fatal", decoder.push("not json\n").messages.length === 0);
+
+  // -------------------------------------------------------------- migration
+
+  console.log("\nmigration");
+
+  const oldDir = join(tmpdir(), `river-old-${Date.now().toString(36)}`);
+  mkdirSync(oldDir, { recursive: true });
+  const oldFile = join(oldDir, "river.db");
+
+  const raw = new DatabaseSync(oldFile);
+  raw.exec(`
+    CREATE TABLE events (
+      id TEXT PRIMARY KEY, author TEXT NOT NULL, seq INTEGER NOT NULL, prev TEXT NOT NULL,
+      kind TEXT NOT NULL, body TEXT NOT NULL, created_at INTEGER NOT NULL, sig TEXT NOT NULL,
+      received_at INTEGER NOT NULL, UNIQUE(author, seq)
+    );
+    CREATE TABLE heads (author TEXT PRIMARY KEY, seq INTEGER NOT NULL, id TEXT NOT NULL);
+  `);
+  raw
+    .prepare(
+      `INSERT INTO events (id, author, seq, prev, kind, body, created_at, sig, received_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      alicePost.id,
+      alicePost.author,
+      alicePost.seq,
+      alicePost.prev,
+      alicePost.kind,
+      JSON.stringify(alicePost.body),
+      alicePost.createdAt,
+      alicePost.sig,
+      Date.now(),
+    );
+  raw
+    .prepare("INSERT INTO heads (author, seq, id) VALUES (?, ?, ?)")
+    .run(alicePost.author, alicePost.seq, alicePost.id);
+  raw.close();
+
+  const migrated = new Store(oldFile);
+  check("an old log survives the migration", migrated.eventCount() === 1, `${migrated.eventCount()}`);
+  check("an old head survives the migration", migrated.head(alice.publicKey, "")?.seq === 0);
+  check("a migrated log still verifies", (await migrated.verifyAll()).ok);
+  const movedSlot = migrated.nextSlot(alice.publicKey, "");
+  const afterMove = await createEvent(alice.privateKey, {
+    author: alice.publicKey,
+    seq: movedSlot.seq,
+    prev: movedSlot.prev,
+    kind: "post",
+    body: { text: "after the move" },
+  });
+  check(
+    "a migrated log can take a new event",
+    (await migrated.ingest(afterMove)).status === "added",
+  );
+  migrated.close();
+  await rm(oldDir, { recursive: true, force: true });
 
   store.close();
   await rm(dir, { recursive: true, force: true });

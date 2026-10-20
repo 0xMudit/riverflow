@@ -142,6 +142,11 @@ export class RiverNode extends EventEmitter {
       void this.dial(address);
     }
 
+    // Know who to listen for from the first second, and give the network a
+    // signed root over our own chain straight away.
+    this.refreshSubscriptions();
+    void this.publishCheckpoint();
+
     this.heartbeat = setInterval(() => this.broadcastHave(), 15_000);
     this.checkpointTimer = setInterval(() => void this.publishCheckpoint(), 60_000);
     this.emit("ready");

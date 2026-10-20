@@ -11,3 +11,6 @@ shots/
 # The original browser prototype, kept for reference.
 prototype-web/node_modules
 prototype-web/.next
+
+# Throwaway probes written while investigating something.
+scripts/_*.ts

@@ -96,10 +96,12 @@ export class PeerServer extends EventEmitter {
   private swarm: import("hyperswarm").default | null = null;
   private dht: import("hyperdht").default | null = null;
   private dhtTimer: NodeJS.Timeout | null = null;
+  private dhtWatchdog: NodeJS.Timeout | null = null;
   private dhtBusy = false;
   private dhtPeers = new Set<string>();
   private dhtError: string | null = null;
   private dhtActive = false;
+  private started = false;
 
   constructor(private readonly options: TransportOptions) {
     super();
@@ -146,6 +148,7 @@ export class PeerServer extends EventEmitter {
 
     const address = server.address();
     this.port = typeof address === "object" && address ? address.port : this.options.port;
+    this.started = true;
 
     if (this.options.discovery) this.startDiscovery();
     if (this.options.dht) void this.startDht();
@@ -341,8 +344,27 @@ export class PeerServer extends EventEmitter {
       this.dht = dht;
       this.swarm = swarm;
 
+      // A node that never hears from a bootstrap node is not on the network,
+      // and the person should be told rather than left waiting.
+      let ready = false;
+      dht.on("ready", () => {
+        ready = true;
+        this.dhtActive = true;
+        this.dhtError = null;
+        this.emit("dht", this.dhtStatus());
+      });
+      dht.on("error", (error: Error) => {
+        this.dhtError = error.message;
+        this.emit("dht", this.dhtStatus());
+      });
+      this.dhtWatchdog = setTimeout(() => {
+        if (ready || !this.started) return;
+        this.dhtError =
+          "no answer from the bootstrap nodes — you can run your own with `npm run bootstrap`";
+        this.emit("dht", this.dhtStatus());
+      }, 20_000);
+
       await swarm.listen();
-      this.dhtActive = true;
       this.log(`dht: announced as ${toHex(keyPair.publicKey).slice(0, 8)}`);
 
       // Announce ourselves on the topic, then keep looking for others.
@@ -468,8 +490,10 @@ export class PeerServer extends EventEmitter {
   stop() {
     if (this.timer) clearInterval(this.timer);
     if (this.dhtTimer) clearInterval(this.dhtTimer);
+    if (this.dhtWatchdog) clearTimeout(this.dhtWatchdog);
     this.timer = null;
     this.dhtTimer = null;
+    this.dhtWatchdog = null;
     for (const connection of this.connections.values()) connection.close();
     this.connections.clear();
     this.udp?.close();
@@ -481,5 +505,6 @@ export class PeerServer extends EventEmitter {
     this.swarm = null;
     this.dht = null;
     this.dhtActive = false;
+    this.started = false;
   }
 }

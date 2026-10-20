@@ -59,9 +59,6 @@ CREATE TABLE IF NOT EXISTS events (
   received_at INTEGER NOT NULL,
   UNIQUE(author, device, seq)
 );
-CREATE INDEX IF NOT EXISTS events_chain ON events(author, device, seq);
-CREATE INDEX IF NOT EXISTS events_kind ON events(kind);
-CREATE INDEX IF NOT EXISTS events_received ON events(received_at DESC);
 
 CREATE TABLE IF NOT EXISTS chains (
   author TEXT NOT NULL,
@@ -222,6 +219,18 @@ CREATE TABLE IF NOT EXISTS wanted (
 );
 `;
 
+/**
+ * Indexes are made after the migration, never before: an old store still has
+ * the previous shape of `events`, and an index on a column that does not exist
+ * yet stops the whole database from opening.
+ */
+const INDEXES = `
+CREATE INDEX IF NOT EXISTS events_chain ON events(author, device, seq);
+CREATE INDEX IF NOT EXISTS events_kind ON events(kind);
+CREATE INDEX IF NOT EXISTS events_received ON events(received_at DESC);
+CREATE INDEX IF NOT EXISTS checkpoints_author ON checkpoints(author, device, seq DESC);
+`;
+
 export interface FeedOptions {
   limit?: number;
   includeSilt?: boolean;
@@ -247,6 +256,7 @@ export class Store {
     this.db.exec("PRAGMA busy_timeout = 4000");
     this.db.exec(SCHEMA);
     this.migrate();
+    this.db.exec(INDEXES);
   }
 
   close(): void {
@@ -265,6 +275,8 @@ export class Store {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.db.exec(`
+        DROP TABLE IF EXISTS chains;
+
         CREATE TABLE events_migrated (
           id          TEXT PRIMARY KEY,
           author      TEXT NOT NULL,

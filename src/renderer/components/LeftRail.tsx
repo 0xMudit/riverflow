@@ -26,6 +26,7 @@ export function LeftRail({
 
   const [editing, setEditing] = useState(false);
   const [restoring, setRestoring] = useState(false);
+  const [bell, setBell] = useState(false);
   const [name, setName] = useState(me?.name === "unnamed" ? "" : (me?.name ?? ""));
   const [bio, setBio] = useState(me?.bio ?? "");
   const [secret, setSecret] = useState("");
@@ -239,6 +240,53 @@ export function LeftRail({
           <span className="meta">
             {peers === 0 ? "no peers yet" : `${peers} peer${peers === 1 ? "" : "s"} · seq ${me?.seq ?? -1}`}
           </span>
+        </div>
+
+        <div style={{ marginTop: 10 }}>
+          <button className="btn btn-ghost" onClick={() => setBell((open) => !open)}>
+            {snapshot.unread > 0 ? `${snapshot.unread} new` : "notifications"}
+          </button>
+
+          {bell && (
+            <div className="panel" style={{ marginTop: 8, padding: "8px 11px" }}>
+              {snapshot.notifications.length === 0 && (
+                <p className="meta" style={{ fontSize: 11 }}>
+                  Nothing yet. Replies, reactions and follows land here.
+                </p>
+              )}
+              {snapshot.notifications.slice(0, 8).map((note) => (
+                <div
+                  key={note.id}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "auto 1fr",
+                    gap: 8,
+                    padding: "4px 0",
+                    fontSize: 11,
+                    alignItems: "baseline",
+                  }}
+                >
+                  <span className="label" style={{ fontSize: 9 }}>
+                    {note.kind}
+                  </span>
+                  <span className="meta">
+                    {shortAddr(note.actor)}
+                    {note.postId ? " · " : ""}
+                    {note.postId ? shortAddr(note.postId) : ""}
+                  </span>
+                </div>
+              ))}
+              {snapshot.unread > 0 && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ marginTop: 8, fontSize: 11 }}
+                  onClick={() => void window.river.markRead()}
+                >
+                  mark read
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </aside>

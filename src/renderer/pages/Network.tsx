@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { BreachReport, IdentityInfo } from "@/core/bridge";
+import type { BreachReport, CheckpointView, IdentityInfo, NetworkStatus } from "@/core/bridge";
 import type { Event, Snapshot, VerifyReport } from "@/core/types";
 import { Copyable } from "../components/Copy";
 import { plural, shortAddr, shortHash, timeAgo } from "../format";
@@ -22,8 +22,30 @@ export function NetworkPage({
   const [busy, setBusy] = useState(false);
   const [events, setEvents] = useState<Event[]>([]);
   const [address, setAddress] = useState("");
+  const [network, setNetwork] = useState<NetworkStatus | null>(null);
+  const [checkpoints, setCheckpoints] = useState<CheckpointView[]>([]);
 
   const mySeq = snapshot.me?.seq ?? -1;
+
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      void window.river
+        .network()
+        .then((status) => alive && setNetwork(status))
+        .catch(() => undefined);
+      void window.river
+        .checkpoints()
+        .then((list) => alive && setCheckpoints(list))
+        .catch(() => undefined);
+    };
+    load();
+    const timer = setInterval(load, 5000);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, [identity.publicKey, mySeq]);
 
   useEffect(() => {
     let alive = true;
@@ -226,6 +248,105 @@ export function NetworkPage({
               </div>
             ))}
           </div>
+        </div>
+      </section>
+
+      <section style={{ marginTop: 26 }}>
+        <div className="label" style={{ marginBottom: 10 }}>
+          Reach
+        </div>
+
+        <div className="panel" style={{ padding: "12px 14px" }}>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "auto 1fr",
+              gap: "7px 16px",
+              fontSize: 12,
+              alignItems: "baseline",
+            }}
+          >
+            <span className="meta">distributed table</span>
+            <span>
+              {network?.dht.active
+                ? "on the network"
+                : network?.dht.enabled
+                  ? "starting…"
+                  : "off"}
+            </span>
+
+            <span className="meta">peers it knows</span>
+            <span>{network?.dht.peers ?? 0}</span>
+
+            <span className="meta">bootstrap</span>
+            <span className="mono" style={{ fontSize: 11 }}>
+              {network?.dht.bootstrap.length ? network.dht.bootstrap.join(", ") : "public nodes"}
+            </span>
+
+            <span className="meta">relay</span>
+            <span>{network?.relay ? "holding other people's logs" : "not holding"}</span>
+
+            <span className="meta">subscribed to</span>
+            <span>{network?.subscriptions.length ?? 0} authors</span>
+
+            <span className="meta">not held yet</span>
+            <span>{network?.wanted ?? 0} chains</span>
+          </div>
+
+          {network?.dht.error && (
+            <p className="meta" style={{ marginTop: 10, color: "var(--danger)" }}>
+              {network.dht.error}
+            </p>
+          )}
+
+          <p className="meta" style={{ marginTop: 12, lineHeight: 1.6 }}>
+            Peers find each other through a distributed table and punch a hole through both
+            firewalls. The traffic is encrypted end to end, so the table never sees a post — and
+            you can point this node at a bootstrap node you run yourself.
+          </p>
+        </div>
+      </section>
+
+      <section style={{ marginTop: 26 }}>
+        <div className="label" style={{ marginBottom: 10 }}>
+          Checkpoints
+        </div>
+
+        <div className="panel" style={{ padding: "4px 14px" }}>
+          {checkpoints.length === 0 && (
+            <p className="meta" style={{ padding: "12px 0" }}>
+              No checkpoint yet — one is signed every minute.
+            </p>
+          )}
+          {checkpoints.map((checkpoint) => (
+            <div
+              key={checkpoint.root}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr auto auto",
+                gap: 10,
+                alignItems: "baseline",
+                padding: "7px 0",
+                borderBottom: "1px dotted var(--line)",
+              }}
+            >
+              <span className="mono" style={{ fontSize: 11 }}>
+                {checkpoint.root.slice(0, 18)}…
+              </span>
+              <span className="meta" style={{ fontSize: 10 }}>
+                seq {checkpoint.seq} · {checkpoint.count} events
+              </span>
+              <span className="meta" style={{ fontSize: 10 }}>
+                {timeAgo(checkpoint.at)}
+              </span>
+            </div>
+          ))}
+
+          <p className="meta" style={{ marginTop: 12, marginBottom: 12, lineHeight: 1.6 }}>
+            A Merkle root over your chain, signed by you. A node that missed part of your history
+            can be handed the root and a short path and check the rest without replaying
+            everything.
+          </p>
         </div>
       </section>
 
