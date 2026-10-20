@@ -170,6 +170,9 @@ function snapshot(includeSilt = false): Snapshot {
       reactions: 2,
     },
     includeSilt,
+    notifications: [],
+    unread: 0,
+    muted: [],
   };
 }
 
@@ -333,6 +336,44 @@ const bridge: RiverBridge = {
   onUpdate: (handler) => {
     listeners.add(handler);
     return () => listeners.delete(handler);
+  },
+
+  publishAs: async (kind, body) => bridge.publish(kind, body),
+
+  network: async () => ({
+    listen: "192.168.1.7:7331",
+    dht: {
+      enabled: true,
+      active: true,
+      peers: 1,
+      bootstrap: ["127.0.0.1:49737"],
+      error: null,
+    },
+    relay: false,
+    peers: snapshot().peers,
+    subscriptions: following,
+    wanted: 0,
+  }),
+
+  checkpoints: async () => [],
+
+  devices: async () => [],
+
+  authoriseDevice: async (device, name) =>
+    bridge.publish("device", { device, name }),
+
+  mute: async () => undefined,
+
+  unmute: async () => undefined,
+
+  markRead: async () => undefined,
+
+  search: async (query) =>
+    posts.filter((post) => post.text.toLowerCase().includes(query.toLowerCase())),
+
+  thread: async (postId) => {
+    const root = posts.find((post) => post.id === postId);
+    return { root: root ?? null, posts: root ? [root] : [] };
   },
 
   onLog: () => () => undefined,

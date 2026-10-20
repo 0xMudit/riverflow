@@ -10,13 +10,18 @@
     "start": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "demo": "tsx scripts/two-nodes.ts",
+    "dht": "tsx scripts/dht-demo.ts",
+    "relay": "tsx scripts/relay.ts",
+    "bootstrap": "tsx scripts/bootstrap.ts",
     "test": "tsx scripts/test-core.ts",
     "peer": "tsx scripts/peer.ts",
     "drive": "node scripts/drive.mjs",
     "preview:web": "vite --config vite.preview.config.ts"
   },
   "dependencies": {
-    "@noble/ed25519": "^3.2.0"
+    "@noble/ed25519": "^3.2.0",
+    "hyperdht": "^6.34.1",
+    "hyperswarm": "^4.17.2"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

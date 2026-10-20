@@ -1,13 +1,14 @@
-import { contextBridge, ipcRenderer } from "electron";
-import type { RiverBridge } from "../core/bridge";
-
 /**
  * The renderer gets a narrow, explicit API. No fs, no net, no key material
  * except when the user asks for a backup.
  */
+import { contextBridge, ipcRenderer } from "electron";
+import type { RiverBridge } from "../core/bridge";
+
 const bridge: RiverBridge = {
   snapshot: (includeSilt = false) => ipcRenderer.invoke("river:snapshot", includeSilt),
   publish: (kind, body) => ipcRenderer.invoke("river:publish", kind, body),
+  publishAs: (kind, body, device) => ipcRenderer.invoke("river:publish-as", kind, body, device),
   dial: (address) => ipcRenderer.invoke("river:dial", address),
   peers: () => ipcRenderer.invoke("river:peers"),
   verify: () => ipcRenderer.invoke("river:verify"),
@@ -19,6 +20,15 @@ const bridge: RiverBridge = {
   importKey: (privateKey) => ipcRenderer.invoke("river:import-key", privateKey),
   bootStatus: () => ipcRenderer.invoke("river:boot-status"),
   resetIdentity: () => ipcRenderer.invoke("river:reset-identity"),
+  network: () => ipcRenderer.invoke("river:network"),
+  checkpoints: (author) => ipcRenderer.invoke("river:checkpoints", author),
+  devices: () => ipcRenderer.invoke("river:devices"),
+  authoriseDevice: (device, name) => ipcRenderer.invoke("river:authorise-device", device, name),
+  mute: (target) => ipcRenderer.invoke("river:mute", target),
+  unmute: (target) => ipcRenderer.invoke("river:unmute", target),
+  markRead: () => ipcRenderer.invoke("river:mark-read"),
+  search: (query) => ipcRenderer.invoke("river:search", query),
+  thread: (postId) => ipcRenderer.invoke("river:thread", postId),
   onUpdate: (handler) => {
     const listener = () => handler();
     ipcRenderer.on("river:update", listener);

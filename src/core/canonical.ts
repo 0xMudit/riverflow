@@ -53,17 +53,4 @@ export async function sha256Hex(input: string | Uint8Array): Promise<string> {
 }
 
 /** Standard pairwise merkle root. Used to fingerprint a log slice cheaply. */
-export async function merkleRoot(leaves: string[]): Promise<string> {
-  if (leaves.length === 0) return ZERO_HASH;
-  let level = leaves.slice();
-  while (level.length > 1) {
-    const next: string[] = [];
-    for (let i = 0; i < level.length; i += 2) {
-      const left = level[i];
-      const right = level[i + 1] ?? left;
-      next.push(await sha256Hex(left + right));
-    }
-    level = next;
-  }
-  return level[0];
-}
+export { merkleRoot } from "./merkle";

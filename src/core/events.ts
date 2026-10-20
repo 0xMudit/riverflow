@@ -20,11 +20,17 @@ export const LIMITS = {
   reason: 140,
 } as const;
 
-export type EventDraft = Pick<Event, "author" | "seq" | "prev" | "kind" | "body" | "createdAt">;
+export type EventDraft = Pick<
+  Event,
+  "author" | "device" | "seq" | "prev" | "kind" | "body" | "createdAt"
+>;
 
 export function eventPreimage(draft: EventDraft): string {
   return canonical({
     author: draft.author,
+    // The device is part of the identity of the event: the same words signed by
+    // a phone and a laptop are two different events, not one rewritten event.
+    ...(draft.device ? { device: draft.device } : {}),
     seq: draft.seq,
     prev: draft.prev,
     kind: draft.kind,
@@ -52,9 +58,12 @@ export async function createEvent(
 export async function verifyEvent(event: Event): Promise<boolean> {
   if (!event || typeof event !== "object") return false;
   if (!HEX_KEY.test(event.id) || !HEX_KEY.test(event.author) || !HEX_SIG.test(event.sig)) return false;
+  if (event.device !== undefined && event.device !== "" && !HEX_KEY.test(event.device)) return false;
   const expected = await eventId(event);
   if (expected !== event.id) return false;
-  return verify(event.author, fromHex(event.id), event.sig);
+  // A delegated device signs for the person, not for itself.
+  const signer = event.device || event.author;
+  return verify(signer, fromHex(event.id), event.sig);
 }
 
 export function validateShape(event: Event, now = Date.now()): string | null {
@@ -105,6 +114,13 @@ export function validateShape(event: Event, now = Date.now()): string | null {
       if (body.hue !== undefined && (!Number.isInteger(body.hue) || body.hue < 0 || body.hue > 359)) {
         return "hue must be 0..359";
       }
+      return null;
+    }
+    case "device": {
+      if (!HEX_KEY.test(body.device ?? "")) return "device needs the key it authorises";
+      if (body.device === event.author) return "the root key needs no authorisation";
+      if (event.device) return "a device cannot authorise another device";
+      if (body.name !== undefined && body.name.length > LIMITS.name) return "device name too long";
       return null;
     }
     default:

@@ -17,7 +17,8 @@ export type EventKind =
   | "retract"
   | "reaction"
   | "follow"
-  | "profile";
+  | "profile"
+  | "device";
 
 export interface EventBody {
   /** post, edit */
@@ -36,13 +37,32 @@ export interface EventBody {
   reason?: string;
   /** follow: append an unfollow instead (the follow stays on the log) */
   unfollow?: boolean;
+  /** device: the key being authorised to write for this identity */
+  device?: string;
+  /** post: media attached, by content hash */
+  media?: BlobRef[];
+}
+
+/** A media blob, addressed by the hash of its bytes. */
+export interface BlobRef {
+  hash: string;
+  size: number;
+  type: string;
+  width?: number;
+  height?: number;
 }
 
 export interface Event {
-  /** sha256 over the canonical form of {author, seq, prev, kind, body, createdAt} */
+  /** sha256 over the canonical form of {author, device, seq, prev, kind, body, createdAt} */
   id: string;
   /** ed25519 public key, hex. This is the account. */
   author: string;
+  /**
+   * The device key that signed this event, when it is not the root key.
+   * Empty means the root key wrote it. Each device keeps its own chain, so
+   * two machines never fork one person's history.
+   */
+  device?: string;
   /** position in this author's log, starting at 0 */
   seq: number;
   /** id of the previous event in this author's log; "" for seq 0 */
@@ -56,8 +76,17 @@ export interface Event {
 
 export interface LogHead {
   author: string;
+  device: string;
   seq: number;
   id: string;
+}
+
+/** A device an identity has authorised to write on its behalf. */
+export interface DeviceView {
+  device: string;
+  name: string;
+  seq: number;
+  createdAt: number;
 }
 
 export type IngestStatus =
@@ -129,6 +158,38 @@ export interface Stats {
   reactions: number;
 }
 
+/** Derived from the log, never authored: what happened to *you*. */
+export interface NotificationView {
+  id: string;
+  kind: "reply" | "reaction" | "follow";
+  actor: string;
+  postId: string | null;
+  text: string;
+  createdAt: number;
+  seen: boolean;
+}
+
+/** An address this node has met before. Kept so it can dial back in later. */
+export interface KnownPeer {
+  address: string;
+  nodeId: string | null;
+  lastSeen: number;
+  failures: number;
+  nextTry: number;
+}
+
+export interface FeedPage {
+  top: PostView[];
+  replies: PostView[];
+  /** pass back as `before` to continue; null when the flow is exhausted */
+  next: { createdAt: number; id: string } | null;
+}
+
+export interface ThreadView {
+  root: PostView | null;
+  posts: PostView[];
+}
+
 export interface Snapshot {
   me: {
     pubkey: string;
@@ -146,6 +207,9 @@ export interface Snapshot {
   listen: string | null;
   stats: Stats;
   includeSilt: boolean;
+  notifications: NotificationView[];
+  unread: number;
+  muted: string[];
 }
 
 export interface VerifyReport {

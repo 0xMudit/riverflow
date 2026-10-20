@@ -1,13 +1,17 @@
 /**
  * Transport: the only part of River that touches the network.
  *
- * Two mechanisms, both serverless:
- *   1. TCP, newline-delimited JSON frames — every message is a whole object.
- *   2. UDP broadcast for local discovery, so two machines on the same network
- *      find each other with no directory, no domain and no account.
+ * Three ways in, one way to talk:
  *
- * Nothing here decides what is true; it only moves bytes between nodes. The
- * node verifies everything it receives.
+ *   1. TCP — an address someone handed you, or a machine on the same network.
+ *   2. LAN discovery — a UDP broadcast every few seconds, so two laptops on
+ *      the same wifi find each other with no directory, no domain, no account.
+ *   3. The DHT — peers find each other across NATs by announcing a topic and
+ *      punching a hole through both firewalls. That traffic is Noise-encrypted
+ *      end to end, so the DHT relays addresses and never sees a post.
+ *
+ * All three carry the same frames (core/wire.ts). Nothing here decides what is
+ * true; it only moves bytes between nodes.
  */
 import { EventEmitter } from "node:events";
 import { createSocket, type Socket as UdpSocket } from "node:dgram";
@@ -15,24 +19,72 @@ import { connect, createServer, type Server, type Socket } from "node:net";
 import { networkInterfaces } from "node:os";
 import { randomBytes } from "node:crypto";
 
-export type WireMessage =
-  | { t: "hello"; v: number; nodeId: string; port: number; heads: Array<[string, number]> }
-  | { t: "have"; heads: Array<[string, number]> }
-  | { t: "want"; ranges: Array<[string, number, number]> }
-  | { t: "events"; events: unknown[] }
-  | { t: "bye" };
+import { fromHex, toHex } from "../core/canonical";
+import {
+  FrameDecoder,
+  encodeFrame,
+  isWireMessage,
+  signHello,
+  verifyHello,
+  type ChainHead,
+  type WireMessage,
+} from "../core/wire";
+
+/** A duplex byte pipe, whether it came from TCP or from the DHT. */
+export interface BytePipe {
+  write(data: string): void;
+  on(event: "data", handler: (chunk: Uint8Array | string) => void): void;
+  on(event: "close", handler: () => void): void;
+  on(event: "error", handler: (error: Error) => void): void;
+  destroy(): void;
+  /** true once the pipe is gone */
+  readonly destroyed?: boolean;
+}
 
 export interface Connection {
   id: string;
+  /** where the peer is, as far as we know */
   address: string;
   direction: "in" | "out";
   since: number;
   lastSeen: number;
+  /** the peer's ed25519 key, once it has proved it holds that key */
+  peer: string | null;
+  /** the peer's transport key, for DHT peers we may want to dial again */
+  transport: string | null;
   send(message: WireMessage): void;
   close(): void;
 }
 
-const MAX_FRAME = 16 * 1024 * 1024;
+export interface DhtStatus {
+  enabled: boolean;
+  active: boolean;
+  /** peers the DHT has told us about */
+  peers: number;
+  /** bootstrap nodes we were pointed at */
+  bootstrap: string[];
+  error: string | null;
+}
+
+export interface TransportOptions {
+  peer: { publicKey: string; privateKey: string; transportSeed: string };
+  port: number;
+  discoveryPort: number;
+  /** LAN broadcast discovery */
+  discovery: boolean;
+  /** DHT discovery and hole punching */
+  dht: boolean;
+  dhtBootstrap: string[];
+  /** 32-byte topic the node joins */
+  topic: Uint8Array;
+  /** the chains this node holds, for the handshake */
+  chains: () => ChainHead[];
+  log?: (line: string) => void;
+}
+
+const HELLO_TIMEOUT = 10_000;
+const DISCOVERY_INTERVAL = 4000;
+const DHT_LOOKUP_INTERVAL = 30_000;
 
 export class PeerServer extends EventEmitter {
   private server: Server | null = null;
@@ -41,14 +93,15 @@ export class PeerServer extends EventEmitter {
   private timer: NodeJS.Timeout | null = null;
   private port = 0;
 
-  constructor(
-    private readonly options: {
-      nodeId: string;
-      port: number;
-      discoveryPort: number;
-      discovery: boolean;
-    },
-  ) {
+  private swarm: import("hyperswarm").default | null = null;
+  private dht: import("hyperdht").default | null = null;
+  private dhtTimer: NodeJS.Timeout | null = null;
+  private dhtBusy = false;
+  private dhtPeers = new Set<string>();
+  private dhtError: string | null = null;
+  private dhtActive = false;
+
+  constructor(private readonly options: TransportOptions) {
     super();
   }
 
@@ -69,8 +122,18 @@ export class PeerServer extends EventEmitter {
     return `127.0.0.1:${this.port}`;
   }
 
+  dhtStatus(): DhtStatus {
+    return {
+      enabled: this.options.dht,
+      active: this.dhtActive,
+      peers: this.dhtPeers.size,
+      bootstrap: this.options.dhtBootstrap,
+      error: this.dhtError,
+    };
+  }
+
   async listen(): Promise<number> {
-    const server = createServer((socket) => this.accept(socket, "in"));
+    const server = createServer((socket) => this.accept(socket, "in", null));
     this.server = server;
 
     await new Promise<void>((resolve, reject) => {
@@ -85,64 +148,133 @@ export class PeerServer extends EventEmitter {
     this.port = typeof address === "object" && address ? address.port : this.options.port;
 
     if (this.options.discovery) this.startDiscovery();
+    if (this.options.dht) void this.startDht();
     return this.port;
   }
 
-  private accept(socket: Socket, direction: "in" | "out"): Connection {
-    socket.setNoDelay(true);
+  // ------------------------------------------------------------------ streams
+
+  private accept(
+    pipe: BytePipe,
+    direction: "in" | "out",
+    transport: string | null,
+    address?: string,
+  ): Connection {
     const id = randomBytes(8).toString("hex");
-    const address = `${socket.remoteAddress ?? "?"}:${socket.remotePort ?? 0}`.replace("::ffff:", "");
+    const label = address ?? `peer:${transport?.slice(0, 8) ?? id}`;
 
     const connection: Connection = {
       id,
-      address,
+      address: label,
       direction,
       since: Date.now(),
       lastSeen: Date.now(),
+      peer: null,
+      transport,
       send: (message) => {
-        if (!socket.destroyed) socket.write(`${JSON.stringify(message)}\n`);
+        try {
+          if (!pipe.destroyed) pipe.write(encodeFrame(message));
+        } catch {
+          /* the peer went away mid-write */
+        }
       },
-      close: () => socket.destroy(),
+      close: () => pipe.destroy(),
     };
 
     this.connections.set(id, connection);
-    socket.setEncoding("utf8");
 
-    let buffer = "";
-    socket.on("data", (chunk: string) => {
+    const decoder = new FrameDecoder();
+    pipe.on("data", (chunk: Uint8Array | string) => {
       connection.lastSeen = Date.now();
-      buffer += chunk;
-      if (buffer.length > MAX_FRAME) {
-        socket.destroy();
+      const text = typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+      const { messages, overflow } = decoder.push(text);
+      if (overflow) {
+        pipe.destroy();
         return;
       }
-      let index = buffer.indexOf("\n");
-      while (index >= 0) {
-        const line = buffer.slice(0, index);
-        buffer = buffer.slice(index + 1);
-        if (line.trim()) {
-          try {
-            this.emit("message", connection, JSON.parse(line) as WireMessage);
-          } catch {
-            socket.destroy();
-            return;
-          }
-        }
-        index = buffer.indexOf("\n");
-      }
+      for (const message of messages) this.onMessage(connection, message);
     });
+
+    pipe.on("error", () => pipe.destroy());
 
     const done = () => {
       if (!this.connections.has(id)) return;
       this.connections.delete(id);
       this.emit("close", connection);
     };
-    socket.on("close", done);
-    socket.on("error", () => socket.destroy());
+    pipe.on("close", done);
+
+    // Prove who we are before saying anything else.
+    void this.sendHello(connection);
 
     this.emit("connection", connection);
     return connection;
   }
+
+  private async sendHello(connection: Connection): Promise<void> {
+    try {
+      const nonce = toHex(crypto.getRandomValues(new Uint8Array(16)));
+      const sig = await signHello(
+        this.options.peer.privateKey,
+        this.options.peer.publicKey,
+        connection.address,
+        nonce,
+      );
+      connection.send({
+        t: "hello",
+        v: 2,
+        peer: this.options.peer.publicKey,
+        addr: connection.address,
+        nonce,
+        sig,
+        chains: this.options.chains(),
+      });
+    } catch (error) {
+      this.log(`could not sign the handshake: ${(error as Error).message}`);
+    }
+  }
+
+  private onMessage(connection: Connection, message: WireMessage) {
+    if (!isWireMessage(message)) return;
+
+    if (message.t === "hello") {
+      void this.onHello(connection, message);
+      return;
+    }
+
+    if (message.t === "bye") {
+      connection.close();
+      return;
+    }
+
+    this.emit("message", connection, message);
+  }
+
+  private async onHello(
+    connection: Connection,
+    message: Extract<WireMessage, { t: "hello" }>,
+  ): Promise<void> {
+    const ok = await verifyHello(message);
+    if (!ok) {
+      this.log(`a peer claimed to be ${message.peer.slice(0, 8)} but could not prove it`);
+      connection.close();
+      return;
+    }
+    if (connection.peer && connection.peer !== message.peer) {
+      this.log("a peer changed its key mid-connection; dropping it");
+      connection.close();
+      return;
+    }
+
+    const first = connection.peer === null;
+    connection.peer = message.peer;
+    this.emit("auth", connection, message.chains);
+
+    // Answer a hello with a hello: the side that dialled may not have spoken yet.
+    if (first) await this.sendHello(connection);
+  }
+
+  // ----------------------------------------------------------------- outbound
 
   dial(address: string, timeoutMs = 6000): Promise<Connection> {
     const [host, rawPort] = address.replace(/^tcp:\/\//, "").split(":");
@@ -162,12 +294,105 @@ export class PeerServer extends EventEmitter {
       socket.once("connect", () => {
         clearTimeout(timer);
         socket.off("error", onError);
-        resolve(this.accept(socket, "out"));
+        resolve(this.accept(socket as unknown as BytePipe, "out", null, address));
       });
 
       socket.once("error", onError);
     });
   }
+
+  /** Dial a peer we met through the DHT, by its transport key. */
+  joinDhtPeer(transportKeyHex: string): void {
+    if (!this.swarm) return;
+    try {
+      this.swarm.joinPeer(fromHex(transportKeyHex));
+    } catch (error) {
+      this.log(`could not reach ${transportKeyHex.slice(0, 8)}: ${(error as Error).message}`);
+    }
+  }
+
+  // ------------------------------------------------------------------ the DHT
+
+  private async startDht(): Promise<void> {
+    try {
+      const [{ default: Hyperswarm }, { default: DHT }] = await Promise.all([
+        import("hyperswarm"),
+        import("hyperdht"),
+      ]);
+
+      const dht = new DHT({
+        // An empty list means "use the public bootstrap nodes"; hyperdht only
+        // treats an explicit array as an override.
+        bootstrap: this.options.dhtBootstrap.length > 0 ? this.options.dhtBootstrap : undefined,
+        // A node that cannot be reached cannot announce anything: persistent
+        // mode is what lets other peers find this one.
+        ephemeral: false,
+      });
+      const keyPair = DHT.keyPair(fromHex(this.options.peer.transportSeed));
+      const swarm = new Hyperswarm({ dht, keyPair, maxPeers: 32 });
+
+      swarm.on("connection", (socket, info) => {
+        const transport = toHex(info.publicKey);
+        this.dhtPeers.add(transport);
+        this.accept(socket, info.client ? "out" : "in", transport);
+        this.emit("dht-peer", transport);
+      });
+
+      this.dht = dht;
+      this.swarm = swarm;
+
+      await swarm.listen();
+      this.dhtActive = true;
+      this.log(`dht: announced as ${toHex(keyPair.publicKey).slice(0, 8)}`);
+
+      // Announce ourselves on the topic, then keep looking for others.
+      void this.announceTopic();
+      this.dhtTimer = setInterval(() => void this.lookupTopic(), DHT_LOOKUP_INTERVAL);
+      void this.lookupTopic();
+    } catch (error) {
+      this.dhtError = (error as Error).message;
+      this.log(`dht: unavailable (${this.dhtError})`);
+      this.emit("dht", this.dhtStatus());
+    }
+  }
+
+  private async announceTopic(): Promise<void> {
+    if (!this.dht || !this.swarm) return;
+    try {
+      for await (const _reply of this.dht.announce(this.options.topic, this.swarm.keyPair)) {
+        // The iterator stays open while we are announced; draining it keeps
+        // the announcement alive.
+        void _reply;
+      }
+    } catch (error) {
+      this.dhtError = (error as Error).message;
+      this.log(`dht: announce failed (${this.dhtError})`);
+    }
+  }
+
+  private async lookupTopic(): Promise<void> {
+    if (!this.dht || !this.swarm || this.dhtBusy) return;
+    this.dhtBusy = true;
+    try {
+      for await (const reply of this.dht.lookup(this.options.topic)) {
+        for (const peer of reply.peers ?? []) {
+          const key = toHex(peer.publicKey);
+          if (this.dhtPeers.has(key)) continue;
+          this.dhtPeers.add(key);
+          this.emit("dht-peer", key);
+          this.swarm.joinPeer(peer.publicKey);
+        }
+      }
+    } catch (error) {
+      this.dhtError = (error as Error).message;
+      this.log(`dht: lookup failed (${this.dhtError})`);
+    } finally {
+      this.dhtBusy = false;
+      this.emit("dht", this.dhtStatus());
+    }
+  }
+
+  // -------------------------------------------------------------- LAN discovery
 
   private startDiscovery() {
     const socket = createSocket({ type: "udp4", reuseAddr: true });
@@ -178,13 +403,12 @@ export class PeerServer extends EventEmitter {
       try {
         const announce = JSON.parse(data.toString()) as {
           app?: string;
-          nodeId?: string;
+          peer?: string;
           port?: number;
         };
         if (announce.app !== "river" || !announce.port) return;
-        if (announce.nodeId === this.options.nodeId) return;
-        // The node decides whether it already knows this peer.
-        this.emit("discovered", `${rinfo.address}:${announce.port}`, announce.nodeId);
+        if (announce.peer === this.options.peer.publicKey) return;
+        this.emit("discovered", `${rinfo.address}:${announce.port}`, announce.peer ?? null);
       } catch {
         /* not our packet */
       }
@@ -197,7 +421,7 @@ export class PeerServer extends EventEmitter {
         /* some adapters refuse; explicit peers still work */
       }
       this.announce();
-      this.timer = setInterval(() => this.announce(), 4000);
+      this.timer = setInterval(() => this.announce(), DISCOVERY_INTERVAL);
     });
   }
 
@@ -205,8 +429,8 @@ export class PeerServer extends EventEmitter {
     if (!this.udp || !this.port) return;
     const payload = JSON.stringify({
       app: "river",
-      v: 1,
-      nodeId: this.options.nodeId,
+      v: 2,
+      peer: this.options.peer.publicKey,
       port: this.port,
     });
     try {
@@ -215,6 +439,8 @@ export class PeerServer extends EventEmitter {
       /* offline: fine */
     }
   }
+
+  // ------------------------------------------------------------------ plumbing
 
   broadcast(message: WireMessage, exceptId?: string) {
     for (const [id, connection] of this.connections) {
@@ -235,14 +461,25 @@ export class PeerServer extends EventEmitter {
     return this.connections.size;
   }
 
+  private log(line: string) {
+    this.options.log?.(line);
+  }
+
   stop() {
     if (this.timer) clearInterval(this.timer);
+    if (this.dhtTimer) clearInterval(this.dhtTimer);
     this.timer = null;
+    this.dhtTimer = null;
     for (const connection of this.connections.values()) connection.close();
     this.connections.clear();
     this.udp?.close();
     this.udp = null;
     this.server?.close();
     this.server = null;
+    void this.swarm?.destroy();
+    void this.dht?.destroy({ force: true });
+    this.swarm = null;
+    this.dht = null;
+    this.dhtActive = false;
   }
 }

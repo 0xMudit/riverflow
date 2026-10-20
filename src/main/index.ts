@@ -3,9 +3,17 @@ import { rename } from "node:fs/promises";
 import { join } from "node:path";
 import type { EventBody, EventKind } from "../core/types";
 import { importIdentity, type KeyBox } from "./identity";
-import { RiverNode } from "./node";
+import { defaultTopic, RiverNode } from "./node";
 
-const ALLOWED_KINDS = new Set<EventKind>(["post", "edit", "retract", "reaction", "follow", "profile"]);
+const ALLOWED_KINDS = new Set<EventKind>([
+  "post",
+  "edit",
+  "retract",
+  "reaction",
+  "follow",
+  "profile",
+  "device",
+]);
 const isDev = !app.isPackaged;
 
 let window: BrowserWindow | null = null;
@@ -78,6 +86,13 @@ async function boot() {
       port,
       discoveryPort: 7332,
       peers: (process.env.RIVER_PEERS ?? "").split(",").filter(Boolean),
+      // The DHT is how a node finds peers across NATs. It is on by default and
+      // can be pointed at any bootstrap node, including one you run yourself.
+      dht: process.env.RIVER_DHT !== "0",
+      dhtBootstrap: (process.env.RIVER_DHT_BOOTSTRAP ?? "").split(",").filter(Boolean),
+      // A relay holds other people's logs so they survive an offline author.
+      relay: process.env.RIVER_RELAY === "1",
+      topic: defaultTopic(),
       box,
       log,
     });
@@ -118,7 +133,17 @@ function registerIpc() {
   ipcMain.handle("river:publish", async (_event, kind: EventKind, body: EventBody) => {
     await ready;
     if (!ALLOWED_KINDS.has(kind)) throw new Error(`unknown event kind: ${kind}`);
-    return current().publish(kind, body ?? {});
+    const running = current();
+    const event = await running.publish(kind, body ?? {});
+    running.refreshSubscriptions();
+    return event;
+  });
+
+  ipcMain.handle("river:publish-as", async (_event, kind: EventKind, body: EventBody, device: string) => {
+    await ready;
+    if (!ALLOWED_KINDS.has(kind)) throw new Error(`unknown event kind: ${kind}`);
+    if (!device) throw new Error("no device named");
+    return current().publish(kind, body ?? {}, device);
   });
 
   ipcMain.handle("river:dial", async (_event, address: string) => {
@@ -212,6 +237,68 @@ function registerIpc() {
       app.relaunch();
       app.exit(0);
     }, 200);
+  });
+
+  ipcMain.handle("river:network", async () => {
+    await ready;
+    const running = current();
+    return {
+      listen: running.server.address(),
+      dht: running.dhtStatus(),
+      relay: process.env.RIVER_RELAY === "1",
+      peers: running.peerViews(),
+      subscriptions: running.store.subscriptions(),
+      wanted: running.store.wanted().length,
+    };
+  });
+
+  ipcMain.handle("river:checkpoints", async (_event, author?: string) => {
+    await ready;
+    const running = current();
+    if (author) return running.store.checkpointsFor(author);
+    const mine = running.store.checkpointsFor(running.identity.publicKey);
+    return mine;
+  });
+
+  ipcMain.handle("river:devices", async () => {
+    await ready;
+    return current().devices();
+  });
+
+  ipcMain.handle("river:authorise-device", async (_event, device: string, name: string) => {
+    await ready;
+    if (!/^[0-9a-f]{64}$/i.test(String(device ?? ""))) {
+      throw new Error("expected a 64-character device key");
+    }
+    return current().authoriseDevice(String(device).toLowerCase(), String(name ?? ""));
+  });
+
+  ipcMain.handle("river:mute", async (_event, target: string) => {
+    await ready;
+    current().store.mute(String(target ?? ""));
+  });
+
+  ipcMain.handle("river:unmute", async (_event, target: string) => {
+    await ready;
+    current().store.unmute(String(target ?? ""));
+  });
+
+  ipcMain.handle("river:mark-read", async () => {
+    await ready;
+    const running = current();
+    running.store.markNotificationsRead(running.identity.publicKey);
+  });
+
+  ipcMain.handle("river:search", async (_event, query: string) => {
+    await ready;
+    const running = current();
+    return running.store.search(String(query ?? ""), { viewer: running.identity.publicKey });
+  });
+
+  ipcMain.handle("river:thread", async (_event, postId: string) => {
+    await ready;
+    const running = current();
+    return running.store.thread(String(postId ?? ""), { viewer: running.identity.publicKey });
   });
 
   ipcMain.handle("river:versions", async () => ({
