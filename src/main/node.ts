@@ -39,6 +39,7 @@ import type {
 } from "../core/types";
 import { loadOrCreateIdentity, type Identity, type KeyBox } from "./identity";
 import { loadOrCreatePeerIdentity, type PeerIdentity } from "./peer-identity";
+import { loadOrCreateDataKey } from "./data-key";
 import { Store } from "./store";
 import { PeerServer, type Connection, type DhtStatus } from "./transport";
 
@@ -104,7 +105,10 @@ export class RiverNode extends EventEmitter {
     if (this.started) return;
     this.identity = await loadOrCreateIdentity(this.options.dataDir, this.options.box ?? null);
     this.peer = await loadOrCreatePeerIdentity(this.options.dataDir, this.options.box ?? null);
-    this.store = new Store(join(this.options.dataDir, "river.db"));
+    // Everything the node keeps is sealed with a key the keychain holds. The
+    // words are not readable on the disk, only on this machine, by this user.
+    const dataKey = await loadOrCreateDataKey(this.options.dataDir, this.options.box ?? null);
+    this.store = new Store(join(this.options.dataDir, "river.db"), { dataKey });
 
     this.server = new PeerServer({
       peer: this.peer,

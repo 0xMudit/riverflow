@@ -4,8 +4,9 @@
  *
  *   npm test
  */
-import { rm } from "node:fs/promises";
+import { rm, copyFile, readFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -42,7 +43,8 @@ function check(name: string, condition: boolean, detail = "") {
 
 async function main() {
   const dir = join(tmpdir(), `river-unit-${Date.now().toString(36)}`);
-  const store = new Store(join(dir, "river.db"));
+  const dataKey = randomBytes(32);
+  const store = new Store(join(dir, "river.db"), { dataKey });
   const alice = await generateKeyPair();
   const bob = await generateKeyPair();
 
@@ -407,6 +409,38 @@ async function main() {
   check("the rest arrives later", rest.messages.length === 1);
   check("junk is dropped, not fatal", decoder.push("not json\n").messages.length === 0);
 
+  // ---------------------------------------------------------------- at rest
+
+  console.log("\nat rest");
+
+  const secret = "a phrase that must never be on the disk in the clear";
+  await store.ingest(await draft(alice, "post", { text: secret }));
+
+  let onDisk = "";
+  for (const file of ["river.db", "river.db-wal", "river.db-shm"]) {
+    try {
+      onDisk += (await readFile(join(dir, file))).toString("latin1");
+    } catch {
+      /* the file may not exist */
+    }
+  }
+  check("the words are not on the disk in the clear", !onDisk.includes(secret));
+  check("the feed still shows them", store.feed({}).top.some((post) => post.text === secret));
+  check("the log still verifies", (await store.verifyAll()).ok);
+
+  await copyFile(join(dir, "river.db"), join(dir, "copy.db"));
+  for (const suffix of ["-wal", "-shm"]) {
+    try {
+      await copyFile(join(dir, `river.db${suffix}`), join(dir, `copy.db${suffix}`));
+    } catch {
+      /* optional */
+    }
+  }
+  const wrong = new Store(join(dir, "copy.db"), { dataKey: randomBytes(32) });
+  check("the wrong key does not open the words", wrong.feed({}).top.every((post) => post.text === ""));
+  check("the wrong key does not verify the log", !(await wrong.verifyAll()).ok);
+  wrong.close();
+
   // -------------------------------------------------------------- migration
 
   console.log("\nmigration");
@@ -445,10 +479,17 @@ async function main() {
     .run(alicePost.author, alicePost.seq, alicePost.id);
   raw.close();
 
-  const migrated = new Store(oldFile);
+  const migrated = new Store(oldFile, { dataKey: randomBytes(32) });
   check("an old log survives the migration", migrated.eventCount() === 1, `${migrated.eventCount()}`);
   check("an old head survives the migration", migrated.head(alice.publicKey, "")?.seq === 0);
   check("a migrated log still verifies", (await migrated.verifyAll()).ok);
+
+  const rawAfterDb = new DatabaseSync(oldFile);
+  const rawAfter = rawAfterDb
+    .prepare("SELECT body FROM events")
+    .get() as { body: string };
+  check("an old log is sealed once a key is used", !rawAfter.body.includes("the first stone"));
+  rawAfterDb.close();
   const movedSlot = migrated.nextSlot(alice.publicKey, "");
   const afterMove = await createEvent(alice.privateKey, {
     author: alice.publicKey,
@@ -472,6 +513,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("\n  FAIL", error.message, "\n");
+  console.error("\n  FAIL", error.message, "\n", error.stack, "\n");
   process.exit(1);
 });

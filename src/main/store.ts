@@ -22,6 +22,7 @@ import { validateShape, verifyEvent } from "../core/events";
 import { verifyLog } from "../core/log";
 import { merkleProof, merkleRoot, type Checkpoint, type MerkleProof } from "../core/merkle";
 import { isBlobRef, type BlobRef } from "../core/blobs";
+import { openText, sealText, isSealed } from "./secret";
 import type {
   DeviceView,
   Event,
@@ -244,12 +245,22 @@ export interface FeedOptions {
   now?: number;
 }
 
+export interface StoreOptions {
+  /**
+   * The key that seals everything at rest. Without it the store keeps text in
+   * the clear, which is fine for a test and wrong for a person's computer.
+   */
+  dataKey?: Uint8Array;
+}
+
 export class Store {
   readonly db: DatabaseSync;
   private stmt = new Map<string, ReturnType<DatabaseSync["prepare"]>>();
+  private readonly dataKey: Uint8Array | null;
 
-  constructor(file: string) {
+  constructor(file: string, options: StoreOptions = {}) {
     if (file !== ":memory:") mkdirSync(dirname(file), { recursive: true });
+    this.dataKey = options.dataKey ?? null;
     this.db = new DatabaseSync(file);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA synchronous = NORMAL");
@@ -257,6 +268,7 @@ export class Store {
     this.db.exec(SCHEMA);
     this.migrate();
     this.db.exec(INDEXES);
+    this.sealPlaintext();
   }
 
   close(): void {
@@ -269,7 +281,11 @@ export class Store {
    * tables are dropped, and the log is re-verified afterwards.
    */
   private migrate(): void {
-    const columns = this.all<{ name: string }>("PRAGMA table_info(events)");
+    // Read the shape of the table directly: the row reader decrypts, and a
+    // pragma result is not a row of ours.
+    const columns = this.db
+      .prepare("PRAGMA table_info(events)")
+      .all() as Array<{ name: string }>;
     if (columns.some((column) => column.name === "device")) return;
 
     this.db.exec("BEGIN IMMEDIATE");
@@ -321,6 +337,61 @@ export class Store {
     `);
   }
 
+  /**
+   * Seal a store that was written before sealing existed.
+   *
+   * An old database holds the words in the clear. When a node gains a data
+   * key, the event bodies are sealed in place and the derived tables are
+   * rebuilt from them, so the text on the disk changes without the log
+   * changing: the ids and signatures are over the same plaintext as before.
+   */
+  private sealPlaintext(): void {
+    if (!this.dataKey) return;
+
+    const rows = this.db
+      .prepare("SELECT id, body FROM events")
+      .all() as Array<{ id: string; body: string }>;
+    const unsealed = rows.filter((row) => !isSealed(row.body));
+    const flag = this.db
+      .prepare("SELECT value FROM meta WHERE key = 'sealed-v1'")
+      .get() as { value: string } | undefined;
+
+    // Nothing to do once the store has been sealed and scrubbed.
+    if (unsealed.length === 0 && flag) return;
+
+    if (unsealed.length > 0) {
+      const update = this.db.prepare("UPDATE events SET body = ? WHERE id = ?");
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        for (const row of unsealed) {
+          update.run(this.seal(row.body, "events.body"), row.id);
+        }
+        this.db.exec("COMMIT");
+      } catch (error) {
+        this.db.exec("ROLLBACK");
+        throw error;
+      }
+
+      // The readable views are derived from the log; rebuild them so they are
+      // sealed too.
+      this.rebuild();
+    }
+
+    // The old cleartext is still sitting in the free pages of the file until
+    // the database is vacuumed. Scrub it, and the write-ahead log with it.
+    try {
+      this.db.exec("VACUUM");
+      this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch {
+      /* a busy database can refuse; the next start will try again */
+    }
+
+    this.run(
+      "INSERT INTO meta (key, value) VALUES ('sealed-v1', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      String(Date.now()),
+    );
+  }
+
   private prep(sql: string) {
     let statement = this.stmt.get(sql);
     if (!statement) {
@@ -331,15 +402,49 @@ export class Store {
   }
 
   private all<T = Row>(sql: string, ...params: SqlParam[]): T[] {
-    return this.prep(sql).all(...params) as T[];
+    const rows = this.prep(sql).all(...params) as T[];
+    return rows.map((row) => this.openRow(row));
   }
 
   private one<T = Row>(sql: string, ...params: SqlParam[]): T | null {
-    return (this.prep(sql).get(...params) as T | undefined) ?? null;
+    const row = this.prep(sql).get(...params) as T | undefined;
+    return row === undefined ? null : this.openRow(row);
   }
 
   private run(sql: string, ...params: SqlParam[]) {
     return this.prep(sql).run(...params);
+  }
+
+  // ------------------------------------------------------------- at rest
+
+  /** Encrypt a value before it reaches the disk. */
+  private seal(text: string, context: string): string {
+    if (!this.dataKey) return text;
+    return sealText(this.dataKey, text, context);
+  }
+
+  /** Decrypt a value that came off the disk. */
+  private open(sealed: string): string {
+    if (!this.dataKey) return sealed;
+    return openText(this.dataKey, sealed);
+  }
+
+  /**
+   * Decrypt the readable columns of a row. The envelope carries its own
+   * context, so one rule covers every table: post text, event bodies, names,
+   * retraction reasons and notification snippets. A value that is not a sealed
+   * envelope is left exactly as it is.
+   */
+  private openRow<T>(row: T): T {
+    if (!this.dataKey) return row;
+    const record = row as Record<string, unknown>;
+    for (const column of ["text", "body", "name", "bio", "retract_reason"]) {
+      const value = record[column];
+      if (typeof value === "string" && isSealed(value)) {
+        record[column] = this.open(value);
+      }
+    }
+    return row;
   }
 
   private tx<T>(work: () => T): T {
@@ -432,7 +537,7 @@ export class Store {
         event.seq,
         event.prev,
         event.kind,
-        JSON.stringify(event.body),
+        this.seal(JSON.stringify(event.body), "events.body"),
         event.createdAt,
         event.sig,
         Date.now(),
@@ -483,7 +588,7 @@ export class Store {
           event.author,
           replyTo,
           root,
-          body.text ?? "",
+          this.seal(body.text ?? "", "posts.text"),
           event.createdAt,
           event.seq,
         );
@@ -505,7 +610,7 @@ export class Store {
         const result = this.run(
           `UPDATE posts SET text = ?, edited_at = ?, seq = ?
            WHERE id = ? AND author = ? AND retracted_at IS NULL`,
-          body.text ?? "",
+          this.seal(body.text ?? "", "posts.text"),
           event.createdAt,
           event.seq,
           target,
@@ -522,7 +627,9 @@ export class Store {
            WHERE id = ? AND author = ? AND retracted_at IS NULL`,
           event.createdAt,
           event.seq,
-          body.reason ?? null,
+          body.reason === undefined || body.reason === null
+            ? null
+            : this.seal(body.reason, "posts.retract_reason"),
           target,
           event.author,
         );
@@ -586,8 +693,8 @@ export class Store {
              updated_at = excluded.updated_at
            WHERE excluded.seq > profiles.seq`,
           event.author,
-          body.name ?? "anon",
-          body.bio ?? "",
+          this.seal(body.name ?? "anon", "profiles.name"),
+          this.seal(body.bio ?? "", "profiles.bio"),
           body.hue ?? 200,
           event.seq,
           event.createdAt,
@@ -626,7 +733,7 @@ export class Store {
       event.author,
       recipient,
       postId,
-      text.slice(0, 200),
+      this.seal(text.slice(0, 200), "notifications.text"),
       event.createdAt,
     );
   }
@@ -740,7 +847,9 @@ export class Store {
       ref.type,
       ref.width ?? null,
       ref.height ?? null,
-      bytes,
+      this.dataKey
+        ? Buffer.from(sealText(this.dataKey, Buffer.from(bytes).toString("base64"), "blobs.data"), "utf8")
+        : bytes,
       Date.now(),
     );
   }
@@ -748,6 +857,14 @@ export class Store {
   getBlob(hash: string): { ref: BlobRef; bytes: Uint8Array } | null {
     const row = this.one<Row>("SELECT * FROM blobs WHERE hash = ?", hash);
     if (!row) return null;
+    const stored = row.data as Uint8Array;
+    let bytes: Uint8Array;
+    if (this.dataKey) {
+      const opened = openText(this.dataKey, Buffer.from(stored).toString("utf8"));
+      bytes = new Uint8Array(Buffer.from(opened, "base64"));
+    } else {
+      bytes = new Uint8Array(stored);
+    }
     return {
       ref: {
         hash: String(row.hash),
@@ -756,7 +873,7 @@ export class Store {
         ...(row.width === null ? {} : { width: Number(row.width) }),
         ...(row.height === null ? {} : { height: Number(row.height) }),
       },
-      bytes: new Uint8Array(row.data as Uint8Array),
+      bytes,
     };
   }
 
@@ -938,29 +1055,37 @@ export class Store {
     return { root: posts.find((post) => post.id === rootId) ?? null, posts };
   }
 
-  /** Case-insensitive substring search over stored words. */
+  /**
+   * Substring search over the words you keep.
+   *
+   * The text is sealed on disk, so the match happens in memory after the
+   * store opens it. A local node holds a few thousand posts, and a scan of
+   * those is quicker than the index would have been to build.
+   */
   search(
     query: string,
     options: { limit?: number; includeSilt?: boolean; viewer?: string } = {},
   ): PostView[] {
-    const text = query.trim();
+    const text = query.trim().toLowerCase();
     if (!text) return [];
     const limit = Math.min(Math.max(options.limit ?? 40, 1), 100);
-    const escaped = text.replace(/[\\%_]/g, (character) => `\\${character}`);
+    const silt = options.includeSilt ? 1 : 0;
 
-    return this.all<Row>(
+    const rows = this.all<Row>(
       `SELECT p.*, EXISTS(SELECT 1 FROM reactions r WHERE r.post_id = p.id AND r.author = ?) AS mine
        FROM posts p
-       WHERE p.text LIKE ? ESCAPE '\\'
-         AND (? = 1 OR p.retracted_at IS NULL)
+       WHERE (? = 1 OR p.retracted_at IS NULL)
          AND p.author NOT IN (SELECT target FROM mutes)
        ORDER BY p.created_at DESC, p.id DESC
-       LIMIT ?`,
+       LIMIT 5000`,
       options.viewer ?? "",
-      `%${escaped}%`,
-      options.includeSilt ? 1 : 0,
-      limit,
-    ).map(toPostView);
+      silt,
+    );
+
+    return rows
+      .map(toPostView)
+      .filter((post) => post.text.toLowerCase().includes(text))
+      .slice(0, limit);
   }
 
   // ----------------------------------------------------------- notifications
@@ -1352,6 +1477,14 @@ function toProfileView(row: Row): ProfileView {
 }
 
 function toEvent(row: Row): Event {
+  let body: EventBody = {};
+  try {
+    body = JSON.parse(String(row.body)) as EventBody;
+  } catch {
+    // A body that will not open — a wrong key, a damaged file — is an empty
+    // body, and the signature check below is what catches it.
+    body = {};
+  }
   return {
     id: String(row.id),
     author: String(row.author),
@@ -1359,7 +1492,7 @@ function toEvent(row: Row): Event {
     seq: Number(row.seq),
     prev: String(row.prev),
     kind: String(row.kind) as EventKind,
-    body: JSON.parse(String(row.body)) as EventBody,
+    body,
     createdAt: Number(row.created_at),
     sig: String(row.sig),
   };

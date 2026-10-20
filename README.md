@@ -108,6 +108,16 @@ Node 24 ships SQLite in core, so there is no native build and no ORM.
 - Events that arrive before the thing they reference are parked in `deferred` and
   applied when the parent lands, so arbitrary arrival order is fine.
 
+**Everything on your disk is sealed.** The words — event bodies, post text,
+names, retraction reasons, notification snippets — are encrypted with AES-256-GCM
+under a data key that only the operating system's keychain can open. The
+ledger's *structure* (who wrote, when, how many events) stays readable, because
+a log you cannot index is not a log. The content is yours alone: another
+program on the machine, or somebody with the disk, finds ciphertext. A store
+written before sealing existed is sealed in place the first time a node with a
+data key opens it, and vacuumed afterwards, so the old cleartext leaves the
+file with it.
+
 ## The security model
 
 - The ed25519 private key is generated on this machine and sealed with the OS
@@ -115,7 +125,9 @@ Node 24 ships SQLite in core, so there is no native build and no ORM.
 - Signing happens in the node process. The renderer never receives the key —
   it asks for a signature, not a secret. The one exception is an explicit,
   user-initiated backup.
-- A second key, the *peer key*, identifies the machine on the network and
+- A second key, the *data key*, seals everything the node keeps on the disk.
+  It is generated once and sealed the same way.
+- A third key, the *peer key*, identifies the machine on the network and
   signs the handshake. It is separate from the author key on purpose: you can
   drop a machine without touching your history.
 - The renderer has no filesystem, no sockets and no Node integration; it talks
@@ -187,6 +199,21 @@ Being honest is the point of this project, so here is the claim in full.
 The honest summary: River removes the chokepoint, not the adversary. It makes
 removal local, provable, and expensive — and it makes the network survive the
 loss of any single machine, including the one running it.
+
+## Writing the node in another language
+
+The app is TypeScript because the window is a web page and the node and the
+window have to agree on every byte they exchange. The **wire protocol is the
+contract**, and it is deliberately small: framed JSON, one signed handshake,
+seven message types. A node written in Rust, Go, C++ or Python can join the
+network beside this one, because it only has to speak the protocol and verify
+the same signatures.
+
+That matters for the places where a native core is worth it: a single static
+binary for relays and phones, where shipping a JavaScript runtime is the
+problem, and the hot paths — ed25519, hashing, Merkle trees, SQLite — under
+load. The TypeScript implementation stays the reference, with its 79
+invariants as the specification.
 
 ## Scale, honestly
 
