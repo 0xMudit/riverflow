@@ -367,6 +367,16 @@ const bridge: RiverBridge = {
 
   unmute: async () => undefined,
 
+  block: async () => undefined,
+
+  unblock: async () => undefined,
+
+  addFilter: async () => undefined,
+
+  removeFilter: async () => undefined,
+
+  moderation: async () => ({ muted: [], blocked: [], filters: [] }),
+
   markRead: async () => undefined,
 
   search: async (query) =>

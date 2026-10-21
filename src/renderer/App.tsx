@@ -1,12 +1,13 @@
 import { useEffect, useState } from "react";
 import type { BootStatus, IdentityInfo, ThisDevice, WalletInfo } from "@/core/bridge";
-import type { DeviceView, EventBody, EventKind } from "@/core/types";
+import type { DeviceView, EventBody, EventKind, PostView } from "@/core/types";
 import { LeftRail } from "./components/LeftRail";
 import { RightRail } from "./components/RightRail";
 import { Toast } from "./components/Toast";
 import { NetworkPage } from "./pages/Network";
 import { ProfilePage } from "./pages/Profile";
 import { RiverPage } from "./pages/River";
+import { YouPage } from "./pages/You";
 import { useNode } from "./useNode";
 import { useToast } from "./useToast";
 import { connect, signBytes, signText, type Eip1193Provider } from "./wallet";
@@ -14,6 +15,7 @@ import { connect, signBytes, signText, type Eip1193Provider } from "./wallet";
 export type View =
   | { name: "river" }
   | { name: "network" }
+  | { name: "you" }
   | { name: "profile"; pubkey: string };
 
 export default function App() {
@@ -28,6 +30,23 @@ export default function App() {
   const [writer, setWriter] = useState("");
   const [wallet, setWallet] = useState<WalletInfo | null>(null);
   const [provider, setProvider] = useState<Eip1193Provider | null>(null);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<PostView[] | null>(null);
+
+  useEffect(() => {
+    const clean = query.trim();
+    if (!clean) {
+      setResults(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      void window.river
+        .search(clean)
+        .then((found) => setResults(found))
+        .catch(() => undefined);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [query]);
 
   useEffect(() => {
     let alive = true;
@@ -124,13 +143,8 @@ export default function App() {
           onNavigate={setView}
           publish={sealed}
           notify={notify}
-          thisDevice={thisDevice}
-          devices={devices}
-          writer={writer}
-          onWriter={setWriter}
-          wallet={wallet}
-          onConnectWallet={(chosen) => void connectWallet(chosen)}
-          onDisconnectWallet={() => void disconnectWallet()}
+          query={query}
+          onSearch={setQuery}
         />
 
         <main className="feed-col">
@@ -164,7 +178,10 @@ export default function App() {
               notify={notify}
               onOpenProfile={(pubkey) => setView({ name: "profile", pubkey })}
               onOpenNetwork={() => setView({ name: "network" })}
+              onOpenYou={() => setView({ name: "you" })}
               writer={writer}
+              results={results}
+              onClearSearch={() => setQuery("")}
             />
           )}
 
@@ -176,6 +193,22 @@ export default function App() {
               onOpenProfile={(pubkey) => setView({ name: "profile", pubkey })}
               thisDevice={thisDevice}
               devices={devices}
+            />
+          )}
+
+          {view.name === "you" && (
+            <YouPage
+              snapshot={snapshot}
+              identity={openIdentity}
+              wallet={wallet}
+              thisDevice={thisDevice}
+              devices={devices}
+              writer={writer}
+              onWriter={setWriter}
+              onConnectWallet={(chosen) => void connectWallet(chosen)}
+              onDisconnectWallet={() => void disconnectWallet()}
+              publish={sealed}
+              notify={notify}
             />
           )}
 

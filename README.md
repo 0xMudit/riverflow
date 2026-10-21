@@ -165,6 +165,16 @@ private key, and neither does the node.
 - There is no password reset and no recovery. Lose the key and that identity
   becomes a reader forever; its history stays on the network.
 
+## The window
+
+Three screens, and that is all:
+
+- **The river** — write, and read. Everything else is out of the way.
+- **The network** — who you are talking to, whether the ledger still verifies,
+  and the signed checkpoints over your own chain.
+- **You** — your profile, the keys you write with (the local one, a wallet, a
+  device), what you have decided not to be shown, and what happened to you.
+
 ## Run it
 
 ```bash

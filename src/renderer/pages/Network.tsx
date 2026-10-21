@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { BreachReport, CheckpointView, IdentityInfo, NetworkStatus, ThisDevice } from "@/core/bridge";
+import type { BreachReport, CheckpointView, IdentityInfo, Moderation, NetworkStatus, ThisDevice } from "@/core/bridge";
 import type { DeviceView, Event, Snapshot, VerifyReport } from "@/core/types";
 import { Copyable } from "../components/Copy";
 import { plural, shortAddr, shortHash, timeAgo } from "../format";
@@ -30,6 +30,7 @@ export function NetworkPage({
   const [deviceName, setDeviceName] = useState("");
   const [network, setNetwork] = useState<NetworkStatus | null>(null);
   const [checkpoints, setCheckpoints] = useState<CheckpointView[]>([]);
+  const [moderation, setModeration] = useState<Moderation>({ muted: [], blocked: [], filters: [] });
 
   const mySeq = snapshot.me?.seq ?? -1;
 
@@ -356,135 +357,6 @@ export function NetworkPage({
         </div>
       </section>
 
-      <section style={{ marginTop: 26 }}>
-        <div className="label" style={{ marginBottom: 10 }}>
-          Devices
-        </div>
-
-        <div className="panel" style={{ padding: "12px 14px" }}>
-          <p className="meta" style={{ lineHeight: 1.6, marginBottom: 10 }}>
-            One identity, many machines. Each device keeps its own chain, so a phone and a laptop
-            never fork your history — and a machine you no longer trust can be revoked without
-            touching the past.
-          </p>
-
-          {thisDevice && (
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr auto",
-                gap: 10,
-                alignItems: "center",
-                padding: "8px 0",
-                borderTop: "1px dotted var(--line)",
-              }}
-            >
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 12 }}>this machine</div>
-                <Copyable
-                  value={thisDevice.publicKey}
-                  label={shortAddr(thisDevice.publicKey)}
-                  className="mono"
-                  title="the device key this machine holds"
-                />
-              </div>
-              {thisDevice.authorised ? (
-                <span className="chip chip-water">may write</span>
-              ) : thisDevice.revoked ? (
-                <span className="chip chip-silt">revoked</span>
-              ) : (
-                <button
-                  className="btn btn-primary"
-                  onClick={() => {
-                    void window.river
-                      .authoriseThisDevice("this machine")
-                      .then(() => notify("This machine may now write on its own chain"))
-                      .catch((cause: Error) => notify(cause.message));
-                  }}
-                >
-                  let it write
-                </button>
-              )}
-            </div>
-          )}
-
-          {devices.map((device) => (
-            <div
-              key={device.device}
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr auto auto",
-                gap: 10,
-                alignItems: "center",
-                padding: "8px 0",
-                borderTop: "1px dotted var(--line)",
-              }}
-            >
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 12 }}>{device.name || "unnamed device"}</div>
-                <Copyable
-                  value={device.device}
-                  label={shortAddr(device.device)}
-                  className="mono"
-                  title={device.device}
-                />
-              </div>
-              {device.revoked ? (
-                <span className="chip chip-silt">revoked</span>
-              ) : (
-                <span className="chip chip-water">may write</span>
-              )}
-              {!device.revoked && (
-                <button
-                  className="btn btn-danger"
-                  style={{ fontSize: 11 }}
-                  onClick={() => {
-                    void window.river
-                      .revokeDevice(device.device)
-                      .then(() => notify("Revoked — its past stays, its future stops"))
-                      .catch((cause: Error) => notify(cause.message));
-                  }}
-                >
-                  revoke
-                </button>
-              )}
-            </div>
-          ))}
-
-          <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
-            <input
-              className="input mono"
-              placeholder="paste a device key"
-              value={deviceKey}
-              onChange={(event) => setDeviceKey(event.target.value)}
-              style={{ fontSize: 11 }}
-            />
-            <input
-              className="input"
-              placeholder="name"
-              value={deviceName}
-              onChange={(event) => setDeviceName(event.target.value)}
-              style={{ fontSize: 11, maxWidth: 130 }}
-            />
-            <button
-              className="btn btn-primary"
-              disabled={!deviceKey.trim()}
-              onClick={() => {
-                void window.river
-                  .authoriseDevice(deviceKey.trim(), deviceName.trim())
-                  .then(() => {
-                    setDeviceKey("");
-                    setDeviceName("");
-                    notify("Device authorised");
-                  })
-                  .catch((cause: Error) => notify(cause.message));
-              }}
-            >
-              authorise
-            </button>
-          </div>
-        </div>
-      </section>
 
       <section style={{ marginTop: 26 }}>
         <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>

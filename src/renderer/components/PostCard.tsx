@@ -72,6 +72,9 @@ export function PostCard({
   const [revealed, setRevealed] = useState(false);
   const [replying, setReplying] = useState(false);
   const [editing, setEditing] = useState(false);
+  const [filtering, setFiltering] = useState(false);
+  const [menu, setMenu] = useState(false);
+  const [word, setWord] = useState("");
   const [draft, setDraft] = useState(post.text);
   const [busy, setBusy] = useState(false);
 
@@ -115,8 +118,35 @@ export function PostCard({
     }
   };
 
-  const retract = async () => {
+  /** Hide this person from your feed. Nothing is deleted; you can undo it. */
+  const blockAuthor = async () => {
     const confirmed = window.confirm(
+      `Block ${author.name}?\n\nTheir posts leave your feed. Nothing is deleted — their history stays on the network — and you can undo this under The network.`,
+    );
+    if (!confirmed) return;
+    try {
+      await window.river.block(post.author);
+      notify(`${author.name} is blocked — undo it under The network`);
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "could not block that");
+    }
+  };
+
+  /** Hide any post that says this word, whoever wrote it. */
+  const hideWord = async () => {
+    const clean = word.trim();
+    if (!clean) return;
+    try {
+      await window.river.addFilter(clean);
+      notify(`Posts saying “${clean}” are hidden here`);
+      setWord("");
+      setFiltering(false);
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "could not add that filter");
+    }
+  };
+
+  const retract = async () => {    const confirmed = window.confirm(
       "Retract this post?\n\nIt will disappear from the river, but it is not deleted. The words stay on your chain forever, and this retraction becomes an event of its own.",
     );
     if (!confirmed) return;
@@ -275,30 +305,115 @@ export function PostCard({
               </>
             )}
 
-            <button className="btn btn-ghost" style={{ fontSize: 11.5 }} onClick={() => void openTrail()}>
-              trail
+            <button
+              className="btn btn-ghost"
+              style={{ fontSize: 13, lineHeight: 1 }}
+              onClick={() => setMenu((value) => !value)}
+              aria-label="More actions"
+              title="More"
+            >
+              ⋯
             </button>
-
-            {isMine && !blocked && (
-              <>
-                <button className="btn btn-ghost" style={{ fontSize: 11.5 }} onClick={() => setEditing(true)}>
-                  edit
-                </button>
-                <button
-                  className="btn btn-ghost"
-                  style={{ fontSize: 11.5, color: "var(--silt)" }}
-                  onClick={() => void retract()}
-                  title="Hide this post; the text stays on your chain"
-                >
-                  retract
-                </button>
-              </>
-            )}
 
             <span className="mono" style={{ marginLeft: "auto", fontSize: 10, color: "var(--ink-faint)" }}>
               ✓ signed
             </span>
           </footer>
+
+          {menu && (
+            <div
+              className="panel"
+              style={{
+                marginTop: 8,
+                padding: "6px 8px",
+                display: "grid",
+                gap: 2,
+                justifySelf: "start",
+                minWidth: 170,
+              }}
+            >
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: 11.5, justifyContent: "flex-start" }}
+                onClick={() => {
+                  setMenu(false);
+                  void openTrail();
+                }}
+              >
+                provenance
+              </button>
+              {isMine && !blocked && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 11.5, justifyContent: "flex-start" }}
+                  onClick={() => {
+                    setMenu(false);
+                    setEditing(true);
+                  }}
+                >
+                  edit
+                </button>
+              )}
+              {isMine && !blocked && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 11.5, justifyContent: "flex-start", color: "var(--silt)" }}
+                  onClick={() => {
+                    setMenu(false);
+                    void retract();
+                  }}
+                >
+                  retract
+                </button>
+              )}
+              {!blocked && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 11.5, justifyContent: "flex-start" }}
+                  onClick={() => {
+                    setMenu(false);
+                    setFiltering(true);
+                  }}
+                >
+                  hide a word
+                </button>
+              )}
+              {!isMine && !blocked && (
+                <button
+                  className="btn btn-ghost"
+                  style={{ fontSize: 11.5, justifyContent: "flex-start" }}
+                  onClick={() => {
+                    setMenu(false);
+                    void blockAuthor();
+                  }}
+                >
+                  block
+                </button>
+              )}
+            </div>
+          )}
+
+          {filtering && !blocked && (
+            <div style={{ marginTop: 10, display: "flex", gap: 6, alignItems: "center" }}>
+              <input
+                className="input"
+                placeholder="a word to hide"
+                value={word}
+                onChange={(event) => setWord(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void hideWord();
+                }}
+                style={{ fontSize: 11.5, maxWidth: 220 }}
+                autoFocus
+              />
+              <button className="btn" disabled={!word.trim()} onClick={() => void hideWord()}>
+                hide posts
+              </button>
+              <button className="btn btn-ghost" onClick={() => setFiltering(false)}>
+                cancel
+              </button>
+            </div>
+          )}
 
           {replying && !blocked && (
             <div style={{ marginTop: 10 }}>

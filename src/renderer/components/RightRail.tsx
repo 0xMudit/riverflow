@@ -166,8 +166,8 @@ export function RightRail({
           What this is
         </div>
         <p className="serif" style={{ fontSize: 12.5, lineHeight: 1.65, color: "var(--ink-dim)" }}>
-          Every post, reply, edit and retraction is a signed event appended to your own chain. Nothing
-          is ever removed — a retraction is itself an event, laid on top of the words it hides.
+          Every post is a signed event appended to your own chain. Nothing is ever removed — a
+          retraction is itself an event, laid on top of the words it hides.
         </p>
         <p className="meta" style={{ marginTop: 10, lineHeight: 1.6 }}>
           Your key never leaves this machine. There is no server to shut down.

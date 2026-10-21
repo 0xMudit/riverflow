@@ -53,7 +53,13 @@ function recoverCandidates(digest: Uint8Array, signature: Uint8Array): string[] 
   const compact = compactSignature(signature);
   if (!compact) return [];
   const found: string[] = [];
-  for (let candidate = 0; candidate < 4; candidate++) {
+  // The wallet's own v is a hint: try that candidate first, then the rest.
+  const hint = signature.length === 65 ? (signature[64] as number) : 0;
+  const preferred = hint >= 27 ? hint - 27 : hint;
+  const order = [preferred, 0, 1, 2, 3].filter(
+    (candidate, index, all) => candidate >= 0 && candidate < 4 && all.indexOf(candidate) === index,
+  );
+  for (const candidate of order) {
     try {
       const parsed = secp256k1.Signature.fromBytes(compact, "compact");
       const withBit = parsed.addRecoveryBit(candidate);

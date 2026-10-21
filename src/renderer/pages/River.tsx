@@ -13,7 +13,10 @@ export function RiverPage({
   notify,
   onOpenProfile,
   onOpenNetwork,
+  onOpenYou,
   writer,
+  results,
+  onClearSearch,
 }: {
   snapshot: Snapshot;
   me: string;
@@ -23,8 +26,12 @@ export function RiverPage({
   notify: (message: string) => void;
   onOpenProfile: (pubkey: string) => void;
   onOpenNetwork: () => void;
+  onOpenYou: () => void;
   /** the device key to write with; empty means the root key */
   writer: string;
+  /** posts matching the search, or null when no search is running */
+  results: PostView[] | null;
+  onClearSearch: () => void;
 }) {
   const iAmNamed = Boolean(snapshot.profiles[me]);
 
@@ -79,15 +86,28 @@ export function RiverPage({
       {!iAmNamed && (
         <div
           className="panel"
-          style={{ marginTop: 16, padding: "12px 14px", borderColor: "rgba(91,217,194,0.24)" }}
+          style={{ marginTop: 16, padding: "20px 22px", borderColor: "rgba(91,217,194,0.24)" }}
         >
-          <p className="serif" style={{ fontSize: 13.5, lineHeight: 1.6, color: "var(--ink-dim)" }}>
-            Your node is running. This river is yours alone until someone connects — claim a name on the
-            left, then add a peer under <strong style={{ color: "var(--ink)" }}>The network</strong>.
+          <h2 className="serif" style={{ fontSize: 19, margin: 0 }}>
+            This is your river.
+          </h2>
+          <p className="serif" style={{ fontSize: 14, lineHeight: 1.65, color: "var(--ink-dim)", marginTop: 8 }}>
+            No account, no server, no feed algorithm. Everything you write is signed by a key that
+            lives on this machine, kept in your chain for good, and shared with anyone you point
+            your node at.
           </p>
-          <button className="btn btn-ghost" style={{ fontSize: 11.5, marginTop: 6, paddingLeft: 0 }} onClick={onOpenNetwork}>
-            open the network →
-          </button>
+          <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+            <button className="btn btn-primary" onClick={onOpenYou}>
+              Choose a name
+            </button>
+            <button className="btn" onClick={onOpenNetwork}>
+              Find people
+            </button>
+          </div>
+          <p className="meta" style={{ marginTop: 12, lineHeight: 1.6 }}>
+            Right now it is quiet: nobody else is here. Share your address, or let the network
+            introduce you.
+          </p>
         </div>
       )}
 
@@ -101,18 +121,54 @@ export function RiverPage({
       </div>
 
       <div style={{ marginTop: 24, borderTop: "1px solid var(--line)" }}>
-        {snapshot.posts.length === 0 && (
-          <div style={{ padding: "46px 20px", textAlign: "center" }}>
-            <p className="serif" style={{ fontSize: 16, color: "var(--ink-dim)" }}>
-              The river is quiet.
-            </p>
-            <p className="meta" style={{ marginTop: 6 }}>
-              Drop the first stone — it stays.
-            </p>
-          </div>
-        )}
+        {results !== null ? (
+          <>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "baseline",
+                padding: "14px 0 4px",
+              }}
+            >
+              <span className="label">search</span>
+              <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={onClearSearch}>
+                back to the river
+              </button>
+            </div>
+            {results.length === 0 && (
+              <div style={{ padding: "40px 20px", textAlign: "center" }}>
+                <p className="serif" style={{ fontSize: 16, color: "var(--ink-dim)" }}>
+                  Nothing you keep says that.
+                </p>
+              </div>
+            )}
+            {results.map((post) => (
+              <PostCard
+                key={post.id}
+                post={post}
+                profiles={snapshot.profiles}
+                me={me}
+                publish={publish}
+                notify={notify}
+                onOpenProfile={onOpenProfile}
+              />
+            ))}
+          </>
+        ) : (
+          <>
+            {snapshot.posts.length === 0 && (
+              <div style={{ padding: "46px 20px", textAlign: "center" }}>
+                <p className="serif" style={{ fontSize: 16, color: "var(--ink-dim)" }}>
+                  The river is quiet.
+                </p>
+                <p className="meta" style={{ marginTop: 6 }}>
+                  Drop the first stone — it stays.
+                </p>
+              </div>
+            )}
 
-        {snapshot.posts.map((post) => {
+            {snapshot.posts.map((post) => {
           const replies = (repliesByRoot.get(post.id) ?? []).filter(
             (reply) => includeSilt || !reply.retracted,
           );
@@ -153,6 +209,8 @@ export function RiverPage({
             </div>
           );
         })}
+          </>
+        )}
       </div>
 
       <p className="meta" style={{ marginTop: 22, lineHeight: 1.7 }}>

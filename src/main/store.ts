@@ -166,6 +166,19 @@ CREATE TABLE IF NOT EXISTS mutes (
   created_at INTEGER NOT NULL
 );
 
+-- A block is stronger than a mute: the person disappears from the feed.
+CREATE TABLE IF NOT EXISTS blocklist (
+  target     TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL
+);
+
+-- Words that hide a post wherever it appears. The author is not punished for
+-- saying them; the post is simply not shown.
+CREATE TABLE IF NOT EXISTS filters (
+  word       TEXT PRIMARY KEY,
+  created_at INTEGER NOT NULL
+);
+
 -- The address book. A node that has met someone can dial them again.
 CREATE TABLE IF NOT EXISTS known_peers (
   address   TEXT PRIMARY KEY,
@@ -1143,7 +1156,8 @@ export class Store {
 
     const visible = `WHERE p.reply_to IS NULL
         AND (? = 1 OR p.retracted_at IS NULL)
-        AND p.author NOT IN (SELECT target FROM mutes)`;
+        AND p.author NOT IN (SELECT target FROM mutes)
+        AND p.author NOT IN (SELECT target FROM blocklist)`;
 
     let topRows: Row[];
     let next: FeedPage["next"] = null;
@@ -1208,6 +1222,7 @@ export class Store {
            WHERE p.root IN (${ids.map(() => "?").join(",")})
              AND (? = 1 OR p.retracted_at IS NULL)
              AND p.author NOT IN (SELECT target FROM mutes)
+             AND p.author NOT IN (SELECT target FROM blocklist)
            ORDER BY p.created_at ASC`,
           viewer,
           ...ids,
@@ -1215,7 +1230,12 @@ export class Store {
         )
       : [];
 
-    return { top: topRows.map(toPostView), replies: replies.map(toPostView), next };
+    // Word filters run here, not in SQL: the text is sealed on disk, so the
+    // only place it can be read is after the store has opened it.
+    const top = topRows.map(toPostView).filter((post) => !this.filtered(post.text));
+    const repliesOut = replies.map(toPostView).filter((post) => !this.filtered(post.text));
+
+    return { top, replies: repliesOut, next };
   }
 
   /** One thread: the root and everything beneath it, oldest first. */
@@ -1245,13 +1265,14 @@ export class Store {
        FROM posts p JOIN thread t ON p.id = t.id
        WHERE (? = 1 OR p.retracted_at IS NULL)
          AND p.author NOT IN (SELECT target FROM mutes)
+         AND p.author NOT IN (SELECT target FROM blocklist)
        ORDER BY p.created_at ASC, p.id ASC`,
       rootId,
       viewer,
       silt,
     );
 
-    const posts = rows.map(toPostView);
+    const posts = rows.map(toPostView).filter((post) => !this.filtered(post.text));
     return { root: posts.find((post) => post.id === rootId) ?? null, posts };
   }
 
@@ -1276,6 +1297,7 @@ export class Store {
        FROM posts p
        WHERE (? = 1 OR p.retracted_at IS NULL)
          AND p.author NOT IN (SELECT target FROM mutes)
+         AND p.author NOT IN (SELECT target FROM blocklist)
        ORDER BY p.created_at DESC, p.id DESC
        LIMIT 5000`,
       options.viewer ?? "",
@@ -1284,6 +1306,7 @@ export class Store {
 
     return rows
       .map(toPostView)
+      .filter((post) => !this.filtered(post.text))
       .filter((post) => post.text.toLowerCase().includes(text))
       .slice(0, limit);
   }
@@ -1331,6 +1354,49 @@ export class Store {
     return this.all<{ target: string }>("SELECT target FROM mutes ORDER BY target").map(
       (row) => row.target,
     );
+  }
+
+  // ---------------------------------------------------------------- blocking
+
+  block(target: string): void {
+    this.run("INSERT OR IGNORE INTO blocklist (target, created_at) VALUES (?, ?)", target, Date.now());
+  }
+
+  unblock(target: string): void {
+    this.run("DELETE FROM blocklist WHERE target = ?", target);
+  }
+
+  blocked(): string[] {
+    return this.all<{ target: string }>("SELECT target FROM blocklist ORDER BY target").map(
+      (row) => row.target,
+    );
+  }
+
+  // ---------------------------------------------------------------- filters
+
+  addFilter(word: string): void {
+    const clean = word.trim().toLowerCase();
+    if (!clean) return;
+    this.run("INSERT OR IGNORE INTO filters (word, created_at) VALUES (?, ?)", clean, Date.now());
+  }
+
+  removeFilter(word: string): void {
+    this.run("DELETE FROM filters WHERE word = ?", word.trim().toLowerCase());
+  }
+
+  filters(): string[] {
+    return this.all<{ word: string }>("SELECT word FROM filters ORDER BY word").map(
+      (row) => row.word,
+    );
+  }
+
+  /** True when a post says something this node has decided not to show. */
+  private filtered(text: string): boolean {
+    const lower = text.toLowerCase();
+    for (const word of this.filters()) {
+      if (word && lower.includes(word)) return true;
+    }
+    return false;
   }
 
   // -------------------------------------------------------------- address book

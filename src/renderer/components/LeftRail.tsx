@@ -1,9 +1,7 @@
 import { useState } from "react";
-import type { IdentityInfo, ThisDevice, WalletInfo } from "@/core/bridge";
-import type { DeviceView, Snapshot } from "@/core/types";
+import type { IdentityInfo } from "@/core/bridge";
+import type { Snapshot } from "@/core/types";
 import { shortAddr } from "../format";
-import { type Eip1193Provider } from "../wallet";
-import { WalletPanel } from "./WalletPanel";
 import { Avatar } from "./Avatar";
 import type { View } from "../App";
 import type { PublishFn } from "../useNode";
@@ -15,13 +13,8 @@ export function LeftRail({
   onNavigate,
   publish,
   notify,
-  thisDevice,
-  devices,
-  writer,
-  onWriter,
-  wallet,
-  onConnectWallet,
-  onDisconnectWallet,
+  query,
+  onSearch,
 }: {
   snapshot: Snapshot;
   identity: IdentityInfo;
@@ -29,42 +22,15 @@ export function LeftRail({
   onNavigate: (view: View) => void;
   publish: PublishFn;
   notify: (message: string) => void;
-  thisDevice: ThisDevice | null;
-  devices: DeviceView[];
-  writer: string;
-  onWriter: (device: string) => void;
-  wallet: WalletInfo | null;
-  onConnectWallet: (provider: Eip1193Provider) => void;
-  onDisconnectWallet: () => void;
+  query: string;
+  onSearch: (query: string) => void;
 }) {
   const me = snapshot.me;
   const named = Boolean(snapshot.profiles[me?.pubkey ?? ""]);
 
-  const [editing, setEditing] = useState(false);
   const [restoring, setRestoring] = useState(false);
-  const [bell, setBell] = useState(false);
-  const [name, setName] = useState(me?.name === "unnamed" ? "" : (me?.name ?? ""));
-  const [bio, setBio] = useState(me?.bio ?? "");
   const [secret, setSecret] = useState("");
   const [busy, setBusy] = useState(false);
-
-  const saveProfile = async () => {
-    if (!name.trim() || busy) return;
-    setBusy(true);
-    try {
-      await publish("profile", {
-        name: name.trim().slice(0, 32),
-        bio: bio.trim().slice(0, 160),
-        hue: me?.hue ?? 200,
-      });
-      setEditing(false);
-      notify("Name written into your chain");
-    } catch (cause) {
-      notify(cause instanceof Error ? cause.message : "could not write profile");
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const backup = async () => {
     try {
@@ -138,7 +104,25 @@ export function LeftRail({
           <span className="nav-dot" />
           The network
         </button>
+        <button
+          className="nav-item"
+          data-active={view.name === "you"}
+          onClick={() => onNavigate({ name: "you" })}
+        >
+          <span className="nav-dot" />
+          You
+        </button>
       </nav>
+
+      <div style={{ marginTop: 12 }}>
+        <input
+          className="input"
+          placeholder="search what you keep"
+          value={query}
+          onChange={(event) => onSearch(event.target.value)}
+          aria-label="Search posts"
+        />
+      </div>
 
       <div className="rail-hide-mobile" style={{ marginTop: "auto", paddingTop: 32 }}>
         <div className="label" style={{ marginBottom: 10 }}>
@@ -157,57 +141,24 @@ export function LeftRail({
           </div>
         </div>
 
-        {!named && !editing && (
-          <button className="btn" style={{ marginTop: 12, width: "100%" }} onClick={() => setEditing(true)}>
+        {!named && (
+          <button
+            className="btn"
+            style={{ marginTop: 12, width: "100%" }}
+            onClick={() => onNavigate({ name: "you" })}
+          >
             Claim a name
           </button>
         )}
 
-        {named && !editing && (
+        {named && (
           <button
             className="btn btn-ghost"
             style={{ marginTop: 8, paddingLeft: 0, fontSize: 12 }}
-            onClick={() => setEditing(true)}
+            onClick={() => onNavigate({ name: "you" })}
           >
             Edit profile
           </button>
-        )}
-
-        {editing && (
-          <div style={{ marginTop: 12, display: "grid", gap: 7 }}>
-            <input
-              className="input"
-              placeholder="name"
-              value={name}
-              maxLength={32}
-              onChange={(event) => setName(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void saveProfile();
-              }}
-              autoFocus
-            />
-            <input
-              className="input"
-              placeholder="bio (optional)"
-              value={bio}
-              maxLength={160}
-              onChange={(event) => setBio(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void saveProfile();
-              }}
-            />
-            <div style={{ display: "flex", gap: 6 }}>
-              <button className="btn btn-primary" disabled={busy || !name.trim()} onClick={() => void saveProfile()}>
-                {busy ? "signing…" : "Sign"}
-              </button>
-              <button className="btn" onClick={() => setEditing(false)}>
-                Cancel
-              </button>
-            </div>
-            <p className="meta" style={{ lineHeight: 1.5, marginTop: 2 }}>
-              Profile changes are events too. Your old name stays on the chain.
-            </p>
-          </div>
         )}
 
         {restoring ? (
@@ -243,13 +194,6 @@ export function LeftRail({
           </div>
         )}
 
-        <WalletPanel
-          wallet={wallet}
-          onConnect={onConnectWallet}
-          onDisconnect={onDisconnectWallet}
-          notify={notify}
-        />
-
         <div style={{ marginTop: 20, display: "flex", alignItems: "center", gap: 6 }}>
           <span
             style={{
@@ -263,84 +207,6 @@ export function LeftRail({
           <span className="meta">
             {peers === 0 ? "no peers yet" : `${peers} peer${peers === 1 ? "" : "s"} · seq ${me?.seq ?? -1}`}
           </span>
-        </div>
-
-        {(devices.length > 0 || thisDevice) && (
-          <div style={{ marginTop: 12 }}>
-            <div className="label" style={{ marginBottom: 6 }}>
-              Writing as
-            </div>
-            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-              <button
-                className={writer === "" ? "chip chip-water" : "btn btn-ghost"}
-                style={{ fontSize: 11 }}
-                onClick={() => onWriter("")}
-                title="The root key of this identity"
-              >
-                root key
-              </button>
-              {devices
-                .filter((device) => !device.revoked)
-                .map((device) => (
-                  <button
-                    key={device.device}
-                    className={writer === device.device ? "chip chip-water" : "btn btn-ghost"}
-                    style={{ fontSize: 11 }}
-                    onClick={() => onWriter(device.device)}
-                    title={device.device}
-                  >
-                    {device.name || shortAddr(device.device)}
-                  </button>
-                ))}
-            </div>
-          </div>
-        )}
-
-        <div style={{ marginTop: 10 }}>
-          <button className="btn btn-ghost" onClick={() => setBell((open) => !open)}>
-            {snapshot.unread > 0 ? `${snapshot.unread} new` : "notifications"}
-          </button>
-
-          {bell && (
-            <div className="panel" style={{ marginTop: 8, padding: "8px 11px" }}>
-              {snapshot.notifications.length === 0 && (
-                <p className="meta" style={{ fontSize: 11 }}>
-                  Nothing yet. Replies, reactions and follows land here.
-                </p>
-              )}
-              {snapshot.notifications.slice(0, 8).map((note) => (
-                <div
-                  key={note.id}
-                  style={{
-                    display: "grid",
-                    gridTemplateColumns: "auto 1fr",
-                    gap: 8,
-                    padding: "4px 0",
-                    fontSize: 11,
-                    alignItems: "baseline",
-                  }}
-                >
-                  <span className="label" style={{ fontSize: 9 }}>
-                    {note.kind}
-                  </span>
-                  <span className="meta">
-                    {shortAddr(note.actor)}
-                    {note.postId ? " · " : ""}
-                    {note.postId ? shortAddr(note.postId) : ""}
-                  </span>
-                </div>
-              ))}
-              {snapshot.unread > 0 && (
-                <button
-                  className="btn btn-ghost"
-                  style={{ marginTop: 8, fontSize: 11 }}
-                  onClick={() => void window.river.markRead()}
-                >
-                  mark read
-                </button>
-              )}
-            </div>
-          )}
         </div>
       </div>
     </aside>

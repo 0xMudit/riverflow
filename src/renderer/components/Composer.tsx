@@ -210,8 +210,13 @@ export function Composer({
                   event {chainSeq}
                 </span>
               )}
-              <button className="btn btn-primary" disabled={!text.trim() || busy} onClick={() => void send()}>
-                {busy ? "signing…" : "Sign & seal"}
+              <button
+                className="btn btn-primary"
+                disabled={!text.trim() || busy}
+                onClick={() => void send()}
+                title="Signed by your key and appended to your chain, for good"
+              >
+                {busy ? "sending…" : "Post"}
               </button>
             </div>
           </div>

@@ -392,6 +392,36 @@ function registerIpc() {
     current().store.unmute(String(target ?? ""));
   });
 
+  ipcMain.handle("river:block", async (_event, target: string) => {
+    await ready;
+    current().store.block(String(target ?? ""));
+  });
+
+  ipcMain.handle("river:unblock", async (_event, target: string) => {
+    await ready;
+    current().store.unblock(String(target ?? ""));
+  });
+
+  ipcMain.handle("river:add-filter", async (_event, word: string) => {
+    await ready;
+    current().store.addFilter(String(word ?? ""));
+  });
+
+  ipcMain.handle("river:remove-filter", async (_event, word: string) => {
+    await ready;
+    current().store.removeFilter(String(word ?? ""));
+  });
+
+  ipcMain.handle("river:moderation", async () => {
+    await ready;
+    const store = current().store;
+    return {
+      muted: store.muted(),
+      blocked: store.blocked(),
+      filters: store.filters(),
+    };
+  });
+
   ipcMain.handle("river:mark-read", async () => {
     await ready;
     const running = current();

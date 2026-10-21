@@ -95,6 +95,13 @@ export interface Challenge {
   nonce: string;
 }
 
+/** What this node has decided not to show, and why it is allowed to decide. */
+export interface Moderation {
+  muted: string[];
+  blocked: string[];
+  filters: string[];
+}
+
 export interface RiverBridge {
   snapshot(includeSilt?: boolean): Promise<Snapshot>;
   publish(kind: EventKind, body: EventBody): Promise<Event>;
@@ -140,6 +147,14 @@ export interface RiverBridge {
   signIn(message: string, signature: string): Promise<boolean>;
   mute(target: string): Promise<void>;
   unmute(target: string): Promise<void>;
+  /** a block hides the person entirely; a mute only quiets them */
+  block(target: string): Promise<void>;
+  unblock(target: string): Promise<void>;
+  /** hide any post that says this word */
+  addFilter(word: string): Promise<void>;
+  removeFilter(word: string): Promise<void>;
+  /** what this node has decided not to show */
+  moderation(): Promise<Moderation>;
   markRead(): Promise<void>;
   search(query: string): Promise<PostView[]>;
   thread(postId: string): Promise<ThreadView>;
