@@ -1,6 +1,6 @@
-import { useState } from "react";
-import type { BootStatus, IdentityInfo } from "@/core/bridge";
-import type { EventBody, EventKind } from "@/core/types";
+import { useEffect, useState } from "react";
+import type { BootStatus, IdentityInfo, ThisDevice, WalletInfo } from "@/core/bridge";
+import type { DeviceView, EventBody, EventKind } from "@/core/types";
 import { LeftRail } from "./components/LeftRail";
 import { RightRail } from "./components/RightRail";
 import { Toast } from "./components/Toast";
@@ -9,6 +9,7 @@ import { ProfilePage } from "./pages/Profile";
 import { RiverPage } from "./pages/River";
 import { useNode } from "./useNode";
 import { useToast } from "./useToast";
+import { connect, signBytes, signText, type Eip1193Provider } from "./wallet";
 
 export type View =
   | { name: "river" }
@@ -21,10 +22,90 @@ export default function App() {
   const { snapshot, identity, error, boot, refresh, publish } = useNode(includeSilt);
   const { message, notify } = useToast();
 
-  const sealed = async (kind: EventKind, body: EventBody) => {
-    const event = await publish(kind, body);
+  const [thisDevice, setThisDevice] = useState<ThisDevice | null>(null);
+  const [devices, setDevices] = useState<DeviceView[]>([]);
+  /** the key this machine writes with: "" is the root key */
+  const [writer, setWriter] = useState("");
+  const [wallet, setWallet] = useState<WalletInfo | null>(null);
+  const [provider, setProvider] = useState<Eip1193Provider | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      void window.river
+        .thisDevice()
+        .then((device) => alive && setThisDevice(device))
+        .catch(() => undefined);
+      void window.river
+        .devices()
+        .then((list) => alive && setDevices(list))
+        .catch(() => undefined);
+      void window.river
+        .wallet()
+        .then((info) => alive && setWallet(info))
+        .catch(() => undefined);
+    };
+    load();
+    return () => {
+      alive = false;
+    };
+  }, [snapshot?.me?.seq]);
+
+  /**
+   * Seal an event.
+   *
+   * With a wallet connected, the node prepares the event and the wallet signs
+   * it: the key is in the wallet, so the window asks and the node checks.
+   * Without one, the node signs it itself, and the key never leaves the node.
+   */
+  const sealed = async (kind: EventKind, body: EventBody, device = "") => {
+    if (provider && wallet?.signedIn && !device) {
+      const draft = await window.river.draft(kind, body);
+      const signature = await signBytes(provider, draft.author, draft.digest);
+      const event = await window.river.submit({
+        id: draft.id,
+        author: draft.author,
+        scheme: draft.scheme,
+        seq: draft.seq,
+        prev: draft.prev,
+        kind: draft.kind,
+        body: draft.body,
+        createdAt: draft.createdAt,
+        // Wallets write 0x in front of a signature; the log keeps plain hex.
+        sig: signature.startsWith("0x") ? signature.slice(2) : signature,
+      });
+      notify(`Sealed · event ${event.seq} in your chain`);
+      return event;
+    }
+    const event = await publish(kind, body, device || undefined);
     notify(`Sealed · event ${event.seq} in your chain`);
     return event;
+  };
+
+  /** Connect a wallet, then prove it holds the key. */
+  const connectWallet = async (chosen: Eip1193Provider) => {
+    try {
+      const address = await connect(chosen);
+      await window.river.useWallet(address);
+      setProvider(chosen);
+
+      // Sign in: a statement the wallet signs once, with a nonce that cannot
+      // be replayed.
+      const challenge = await window.river.challenge();
+      const signature = await signText(chosen, address, challenge.message);
+      const ok = await window.river.signIn(challenge.message, signature);
+      const info = await window.river.wallet();
+      setWallet(info);
+      notify(ok ? `Signed in with ${address.slice(0, 10)}…` : "the wallet could not be verified");
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "the wallet did not answer");
+    }
+  };
+
+  const disconnectWallet = async () => {
+    await window.river.useWallet(null);
+    setProvider(null);
+    setWallet(null);
   };
 
   const openIdentity = identity as IdentityInfo | null;
@@ -43,6 +124,13 @@ export default function App() {
           onNavigate={setView}
           publish={sealed}
           notify={notify}
+          thisDevice={thisDevice}
+          devices={devices}
+          writer={writer}
+          onWriter={setWriter}
+          wallet={wallet}
+          onConnectWallet={(chosen) => void connectWallet(chosen)}
+          onDisconnectWallet={() => void disconnectWallet()}
         />
 
         <main className="feed-col">
@@ -76,6 +164,7 @@ export default function App() {
               notify={notify}
               onOpenProfile={(pubkey) => setView({ name: "profile", pubkey })}
               onOpenNetwork={() => setView({ name: "network" })}
+              writer={writer}
             />
           )}
 
@@ -85,6 +174,8 @@ export default function App() {
               identity={openIdentity}
               notify={notify}
               onOpenProfile={(pubkey) => setView({ name: "profile", pubkey })}
+              thisDevice={thisDevice}
+              devices={devices}
             />
           )}
 

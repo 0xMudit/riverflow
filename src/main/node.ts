@@ -19,10 +19,11 @@ import { EventEmitter } from "node:events";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
-import { cleanText, createEvent, LIMITS } from "../core/events";
+import { cleanText, createEvent, eventId, LIMITS } from "../core/events";
+import { formatSiwe, signatureBytes, verifySiwe } from "../core/eth";
 import { fromHex, toHex } from "../core/canonical";
 import { checkpointPayload, merkleRoot, verifyMerkleProof, type Checkpoint } from "../core/merkle";
-import { chunkBytes, joinChunks, verifyBlob, type BlobRef } from "../core/blobs";
+import { chunkBytes, joinChunks, verifyBlob, blobHash, BlobTransfer, BLOB_MAX_BYTES, type BlobRef } from "../core/blobs";
 import { sign, verify } from "../core/crypto";
 import type {
   ChainHead,
@@ -32,14 +33,18 @@ import type {
   DeviceView,
   Event,
   EventBody,
+  EventDraftView,
   EventKind,
+  EventScheme,
   PeerView,
   Snapshot,
   VerifyReport,
 } from "../core/types";
 import { loadOrCreateIdentity, type Identity, type KeyBox } from "./identity";
 import { loadOrCreatePeerIdentity, type PeerIdentity } from "./peer-identity";
+import { loadOrCreateDeviceIdentity, type DeviceIdentity } from "./device-identity";
 import { loadOrCreateDataKey } from "./data-key";
+import { globalTopic, shardTopics } from "../core/topics";
 import { Store } from "./store";
 import { PeerServer, type Connection, type DhtStatus } from "./transport";
 
@@ -71,6 +76,10 @@ interface Link {
 const CHUNK = 120;
 /** How many events of an unknown author's log we pull to learn who they are. */
 const SAMPLE = 3;
+/** How long a want for a chain nobody has answered stays on the books. */
+const WANT_TTL_MS = 10 * 60 * 1000;
+/** How long a request is left alone before the chain is asked for again. */
+const WANT_RETRY_MS = 5_000;
 /** How many authors a relay will hold the logs of. */
 const RELAY_QUOTA = 2000;
 
@@ -79,11 +88,18 @@ export class RiverNode extends EventEmitter {
   store!: Store;
   identity!: Identity;
   peer!: PeerIdentity;
+  device!: DeviceIdentity;
   server!: PeerServer;
 
   private links = new Map<string, Link>();
   private byNode = new Map<string, string>();
   private dialing = new Set<string>();
+  /** checkpoints we were told about, waiting for a proof that they are real */
+  private pendingProofs = new Map<string, string>();
+  /** the wallet this machine is using, and whether it has signed in */
+  private wallet: { address: string; signedIn: boolean } | null = null;
+  /** the one sign-in challenge that is outstanding */
+  private challenge: string | null = null;
   private heartbeat: NodeJS.Timeout | null = null;
   private gossipTimer: NodeJS.Timeout | null = null;
   private checkpointTimer: NodeJS.Timeout | null = null;
@@ -105,6 +121,7 @@ export class RiverNode extends EventEmitter {
     if (this.started) return;
     this.identity = await loadOrCreateIdentity(this.options.dataDir, this.options.box ?? null);
     this.peer = await loadOrCreatePeerIdentity(this.options.dataDir, this.options.box ?? null);
+    this.device = await loadOrCreateDeviceIdentity(this.options.dataDir, this.options.box ?? null);
     // Everything the node keeps is sealed with a key the keychain holds. The
     // words are not readable on the disk, only on this machine, by this user.
     const dataKey = await loadOrCreateDataKey(this.options.dataDir, this.options.box ?? null);
@@ -117,7 +134,7 @@ export class RiverNode extends EventEmitter {
       discovery: this.options.discovery ?? true,
       dht: this.options.dht ?? false,
       dhtBootstrap: this.options.dhtBootstrap ?? [],
-      topic: this.options.topic ?? defaultTopic(),
+      topics: await this.topics(),
       chains: () => this.chainHeads(),
       log: (line) => this.log(line),
     });
@@ -157,12 +174,15 @@ export class RiverNode extends EventEmitter {
   }
 
   async stop(): Promise<void> {
+    // Flip first: anything mid-flight (publishCheckpoint awaits merkleRoot)
+    // checks `started` after its awaits and backs off instead of writing to a
+    // closed database.
+    this.started = false;
     if (this.heartbeat) clearInterval(this.heartbeat);
     if (this.gossipTimer) clearTimeout(this.gossipTimer);
     if (this.checkpointTimer) clearInterval(this.checkpointTimer);
     this.server?.stop();
     this.store?.close();
-    this.started = false;
   }
 
   get running(): boolean {
@@ -179,7 +199,10 @@ export class RiverNode extends EventEmitter {
   async publish(kind: EventKind, input: EventBody, device = ""): Promise<Event> {
     const body = normaliseBody(kind, input);
     const slot = this.store.nextSlot(this.identity.publicKey, device);
-    const event = await createEvent(this.identity.privateKey, {
+    // A device signs for the person, with its own key.
+    const signingKey =
+      device && device === this.device.publicKey ? this.device.privateKey : this.identity.privateKey;
+    const event = await createEvent(signingKey, {
       author: this.identity.publicKey,
       device: device || undefined,
       seq: slot.seq,
@@ -198,9 +221,153 @@ export class RiverNode extends EventEmitter {
     return event;
   }
 
+  /**
+   * A draft for somebody else to sign.
+   *
+   * The node knows where in the chain an event belongs and what its id will
+   * be, but it does not hold the key: a wallet does. So the node hands back
+   * the draft, the person signs it in their wallet, and the signed event comes
+   * back to be checked and filed.
+   */
+  async draftEvent(
+    kind: EventKind,
+    input: EventBody,
+    options: { author?: string; scheme?: EventScheme } = {},
+  ): Promise<EventDraftView> {
+    const body = normaliseBody(kind, input);
+    const author = options.author ?? this.wallet?.address ?? this.identity.publicKey;
+    const scheme = options.scheme ?? (author === this.identity.publicKey ? "ed25519" : "eth");
+    const slot = this.store.nextSlot(author, "");
+    const createdAt = Date.now();
+    const id = await eventId({
+      author,
+      scheme: scheme === "ed25519" ? undefined : scheme,
+      seq: slot.seq,
+      prev: slot.prev,
+      kind,
+      body,
+      createdAt,
+    });
+    return {
+      author,
+      scheme,
+      seq: slot.seq,
+      prev: slot.prev,
+      kind,
+      body,
+      createdAt,
+      id,
+      /** the bytes to sign */
+      digest: id,
+      signing: scheme === "eth" ? "personal_sign" : "ed25519",
+    };
+  }
+
+  /** Take an event somebody else signed, check it, and file it. */
+  async submitEvent(event: Event): Promise<Event> {
+    const result = await this.store.ingest(event);
+    if (result.status !== "added") {
+      throw new Error(result.reason ?? `could not append event (${result.status})`);
+    }
+    this.broadcastHave();
+    this.emit("update", "local");
+    return event;
+  }
+
+  // ------------------------------------------------------------------ wallets
+
+  /** Remember the wallet this machine is using, if any. */
+  setWallet(address: string | null): void {
+    if (!address) {
+      this.wallet = null;
+      this.emit("update", "wallet");
+      return;
+    }
+    this.wallet = { address: address.toLowerCase(), signedIn: false };
+    this.emit("update", "wallet");
+  }
+
+  walletInfo(): { address: string; signedIn: boolean } | null {
+    return this.wallet ? { ...this.wallet } : null;
+  }
+
+  /** A sign-in challenge: a statement the wallet can sign, once. */
+  createChallenge(): { message: string; nonce: string } {
+    const nonce = toHex(crypto.getRandomValues(new Uint8Array(16)));
+    this.challenge = nonce;
+    return {
+      nonce,
+      message: formatSiwe({
+        domain: "river",
+        address: this.wallet?.address ?? "",
+        statement: "Sign in to River. This proves the wallet is yours.",
+        uri: "river://signin",
+        nonce,
+      }),
+    };
+  }
+
+  /** Check the signature that came back with a challenge. */
+  async verifySignIn(message: string, signatureHex: string): Promise<boolean> {
+    const result = verifySiwe(message, signatureBytes(signatureHex));
+    if (!result) return false;
+    if (!this.challenge || result.nonce !== this.challenge) return false;
+    if (!this.wallet || result.address !== this.wallet.address) {
+      this.wallet = { address: result.address, signedIn: true };
+    } else {
+      this.wallet.signedIn = true;
+    }
+    this.challenge = null;
+    this.emit("update", "wallet");
+    return true;
+  }
+
   /** Authorise a new device key to write for this identity. */
   async authoriseDevice(devicePublicKey: string, name = ""): Promise<Event> {
     return this.publish("device", { device: devicePublicKey, name });
+  }
+
+  /** Authorise this machine's own device key, so it can write on its own chain. */
+  async authoriseThisDevice(name = "this machine"): Promise<Event> {
+    return this.authoriseDevice(this.device.publicKey, name);
+  }
+
+  /** Withdraw a device's authority. Its past stays; its future stops. */
+  async revokeDevice(devicePublicKey: string): Promise<Event> {
+    return this.publish("device", { device: devicePublicKey, revoked: true, name: "" });
+  }
+
+  /**
+   * Take in media. The bytes are checked against their hash before they are
+   * kept, and stored under that hash: one copy serves every follower.
+   */
+  async attachMedia(
+    bytes: Uint8Array,
+    type: string,
+    dimensions: { width?: number; height?: number } = {},
+  ): Promise<BlobRef> {
+    if (bytes.length > BLOB_MAX_BYTES) {
+      throw new Error(`media is limited to ${Math.round(BLOB_MAX_BYTES / 1024 / 1024)} MB`);
+    }
+    const hash = await blobHash(bytes);
+    const ref: BlobRef = {
+      hash,
+      size: bytes.length,
+      type: type || "application/octet-stream",
+      ...(dimensions.width ? { width: dimensions.width } : {}),
+      ...(dimensions.height ? { height: dimensions.height } : {}),
+    };
+    this.store.putBlob(ref, bytes);
+    this.emit("update", "blobs");
+    return ref;
+  }
+
+  /** The topics this node announces on: the global one, plus its shards. */
+  private async topics(): Promise<Uint8Array[]> {
+    const base = this.options.topic ?? globalTopic();
+    const authors = this.store.following(this.identity.publicKey);
+    const shards = await shardTopics(authors);
+    return [base, ...shards];
   }
 
   // ------------------------------------------------------------------- peers
@@ -310,15 +477,15 @@ export class RiverNode extends EventEmitter {
 
       case "events": {
         let added = 0;
-        const gaps = new Set<string>();
+        const touched = new Set<string>();
         for (const raw of message.events) {
           const event = raw as Event;
           const result = await this.store.ingest(event);
           if (result.status === "added") added++;
-          else if (result.status === "gap") gaps.add(`${event.author}|${event.device ?? ""}`);
           else if (result.status === "invalid") {
             this.log(`rejected an event: ${result.reason}`);
           }
+          touched.add(`${event.author}|${event.device ?? ""}`);
         }
         if (added > 0) {
           this.log(`accepted ${added} event(s) from ${link.nodeId ?? connection.address}`);
@@ -326,9 +493,14 @@ export class RiverNode extends EventEmitter {
           // Gossip onward: this is what makes it a network rather than a client.
           this.scheduleGossip();
         }
-        for (const key of gaps) {
+        // A chain that has arrived in full is no longer wanted.
+        this.reconcileWants();
+        // A peer sends what we asked for, which is often only the beginning of
+        // a chain. Ask for the rest now, rather than waiting for the next
+        // heartbeat to find out what is still missing.
+        for (const key of touched) {
           const [author, device] = key.split("|");
-          this.requestChain(connection, author, device ?? "");
+          this.requestRest(connection, author, device ?? "");
         }
         break;
       }
@@ -346,11 +518,34 @@ export class RiverNode extends EventEmitter {
           path: message.path,
           leaf: message.leaf,
         });
-        if (valid) {
+        const key = `${message.author}|${message.device}`;
+        const expected = this.pendingProofs.get(key);
+        // The proof must check out against the root we were given, if we have
+        // one: a proof of anything else is a proof of nothing.
+        if (valid && (expected === undefined || expected === message.root)) {
+          this.pendingProofs.delete(key);
           // The proof says the event is in that log. Pull the log and check.
           this.noteHead(message.author, message.device, message.seq);
           this.requestChain(connection, message.author, message.device);
         }
+        break;
+      }
+
+      case "proof-want": {
+        // Somebody wants to know that an event is in a log we hold. Prove it.
+        const proof = await this.store.proofFor(message.author, message.device, message.seq);
+        if (!proof) break;
+        connection.send({
+          t: "proof",
+          author: message.author,
+          device: message.device,
+          seq: message.seq,
+          leaf: proof.leaf,
+          root: proof.root,
+          index: proof.index,
+          size: proof.size,
+          path: proof.path,
+        });
         break;
       }
 
@@ -418,9 +613,13 @@ export class RiverNode extends EventEmitter {
    */
   private noteHead(author: string, device: string, seq: number): void {
     const head = this.store.head(author, device);
-    const wanted = this.store.wanted().find((entry) => entry.author === author && entry.device === device);
+    const wanted = this.store.wantFor(author, device);
 
     if (head && head.seq >= seq) return;
+
+    // A request for this chain is already outstanding. Asking again would
+    // make the peer send the same events a second time.
+    if (wanted && wanted.seq >= seq && Date.now() - wanted.at < WANT_RETRY_MS) return;
 
     // A relay keeps a bounded number of logs, so one busy author cannot fill
     // the disk of a volunteer machine.
@@ -445,7 +644,7 @@ export class RiverNode extends EventEmitter {
   ): void {
     const head = this.store.head(author, device);
     const start = from ?? (head ? head.seq + 1 : 0);
-    const end = to ?? (this.store.wanted().find((e) => e.author === author && e.device === device)?.seq ?? start);
+    const end = to ?? (this.store.wantFor(author, device)?.seq ?? start);
     if (end < start) return;
 
     // A relay mirrors whole logs, so an author can go offline without their
@@ -453,6 +652,33 @@ export class RiverNode extends EventEmitter {
     // so nobody pulls the whole internet to find out who exists.
     const sampleEnd = this.relay || head ? end : Math.max(start, end - SAMPLE);
     connection.send({ t: "want", ranges: [[author, device, start, Math.max(start, sampleEnd)]] });
+  }
+
+  /**
+   * Forget the chains we have now.
+   *
+   * A want means "a peer told us about a chain we do not hold". Once the chain
+   * has arrived in full the want is spent, and a want that nobody answers must
+   * not be kept for ever.
+   */
+  private reconcileWants(): void {
+    this.store.clearSatisfiedWants();
+    this.store.expireWants(WANT_TTL_MS);
+  }
+
+  /**
+   * Ask for what is still missing of a chain we have only had a part of.
+   *
+   * A peer sends what we asked for. When that was only the opening of a
+   * chain, the rest has to be asked for again — otherwise the node waits for
+   * the next heartbeat to learn that it is still behind.
+   */
+  private requestRest(connection: Connection, author: string, device: string): void {
+    const want = this.store.wantFor(author, device);
+    if (!want) return;
+    const head = this.store.head(author, device);
+    if (head && head.seq >= want.seq) return;
+    this.requestChain(connection, author, device);
   }
 
   // ------------------------------------------------------------- checkpoints
@@ -473,6 +699,9 @@ export class RiverNode extends EventEmitter {
       at: Date.now(),
     };
     const sig = await sign(this.identity.privateKey, new TextEncoder().encode(checkpointPayload(checkpoint)));
+    // The awaits above yield: stop() may have closed the store underneath us
+    // (a short-lived process — the CLI — exits seconds after start).
+    if (!this.started) return null;
     this.store.saveCheckpoint(checkpoint, sig);
     this.broadcast({ t: "checkpoint", ...checkpoint, sig });
     return checkpoint;
@@ -506,10 +735,35 @@ export class RiverNode extends EventEmitter {
     this.store.saveCheckpoint(checkpoint, message.sig);
     this.emit("update", "checkpoints");
 
-    // If we are behind that root, we want the events it covers.
+    // If we hold the whole chain, a checkpoint that disagrees with it is a
+    // fork. Say so out loud rather than quietly keeping both.
     const head = this.store.head(message.author, message.device);
+    if (head && head.seq + 1 >= message.count) {
+      const ours = await this.store.localRoot(message.author, message.device);
+      if (ours && ours !== message.root) {
+        this.log(
+          `fork: ${message.author.slice(0, 8)} has two histories (checkpoint ${message.root.slice(0, 8)} ≠ ours ${ours.slice(0, 8)})`,
+        );
+        this.emit("update", "fork");
+      }
+    }
+
+    // If we are behind that root, we want the events it covers.
     if (!head || head.seq < message.seq) {
       this.noteHead(message.author, message.device, message.seq);
+    }
+
+    // We do not hold this chain at all. Ask for a proof that the chain is
+    // real before we pull it: a checkpoint on its own is a claim, a proof is
+    // a fact.
+    if (!head) {
+      this.pendingProofs.set(`${message.author}|${message.device}`, message.root);
+      connection.send({
+        t: "proof-want",
+        author: message.author,
+        device: message.device,
+        seq: message.seq,
+      });
     }
   }
 
@@ -530,27 +784,43 @@ export class RiverNode extends EventEmitter {
     }
   }
 
-  private pendingBlobs = new Map<string, Uint8Array[]>();
+  private pendingBlobs = new BlobTransfer();
 
+  /**
+   * Take in a blob, one chunk at a time.
+   *
+   * A peer is not trusted with this machine's memory: the bytes are capped,
+   * the number of open transfers is capped, a transfer that stalls is dropped,
+   * and the peer may not change its mind about the size halfway through. All
+   * of that lives in `BlobTransfer`; this is only the wiring.
+   */
   private async receiveBlobChunk(message: {
     hash: string;
     index: number;
     total: number;
     data: string;
   }): Promise<void> {
-    const parts = this.pendingBlobs.get(message.hash) ?? [];
-    parts[message.index] = fromHex(message.data);
-    this.pendingBlobs.set(message.hash, parts);
+    const result = this.pendingBlobs.accept(
+      message.hash,
+      message.index,
+      message.total,
+      message.data,
+    );
 
-    if (parts.filter(Boolean).length < message.total) return;
-    this.pendingBlobs.delete(message.hash);
+    if (result.status === "rejected") {
+      this.log(`dropped a blob chunk: ${result.reason}`);
+      return;
+    }
+    if (result.status === "pending") return;
 
-    const bytes = joinChunks(parts);
+    const bytes = result.bytes;
     if (!(await verifyBlob(message.hash, bytes))) {
       this.log(`rejected a blob: its bytes do not match ${message.hash.slice(0, 8)}`);
       return;
     }
-    const ref: BlobRef = { hash: message.hash, size: bytes.length, type: "application/octet-stream" };
+    // The type the author declared, when a post has said anything about it.
+    const type = this.store.mediaType(message.hash) ?? "application/octet-stream";
+    const ref: BlobRef = { hash: message.hash, size: bytes.length, type };
     this.store.putBlob(ref, bytes);
     this.emit("update", "blobs");
   }

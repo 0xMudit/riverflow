@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import type { BootStatus, IdentityInfo } from "@/core/bridge";
 import type { Event, EventBody, EventKind, Snapshot } from "@/core/types";
 
-export type PublishFn = (kind: EventKind, body: EventBody) => Promise<Event>;
+export type PublishFn = (kind: EventKind, body: EventBody, device?: string) => Promise<Event>;
 
 /**
  * The window's whole view of the world: whatever the local node says, re-read
@@ -48,8 +48,11 @@ export function useNode(includeSilt: boolean) {
   }, [refresh]);
 
   const publish = useCallback<PublishFn>(
-    async (kind, body) => {
-      const event = await window.river.publish(kind, body);
+    async (kind, body, device) => {
+      // A device writes on its own chain, under the person's authority.
+      const event = device
+        ? await window.river.publishAs(kind, body, device)
+        : await window.river.publish(kind, body);
       await refresh();
       return event;
     },

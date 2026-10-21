@@ -26,16 +26,19 @@ import {
   isWireMessage,
   signHello,
   verifyHello,
+  PROTOCOL_VERSION,
   type ChainHead,
   type WireMessage,
 } from "../core/wire";
 
 /** A duplex byte pipe, whether it came from TCP or from the DHT. */
 export interface BytePipe {
-  write(data: string): void;
+  /** returns false when the pipe is full and the caller should wait for drain */
+  write(data: string): boolean;
   on(event: "data", handler: (chunk: Uint8Array | string) => void): void;
   on(event: "close", handler: () => void): void;
   on(event: "error", handler: (error: Error) => void): void;
+  on(event: "drain", handler: () => void): void;
   destroy(): void;
   /** true once the pipe is gone */
   readonly destroyed?: boolean;
@@ -52,6 +55,10 @@ export interface Connection {
   peer: string | null;
   /** the peer's transport key, for DHT peers we may want to dial again */
   transport: string | null;
+  /** our nonce for this connection; the peer signs it to bind itself to us */
+  nonce: string;
+  /** true once we have sent a hello carrying the peer's nonce */
+  bound: boolean;
   send(message: WireMessage): void;
   close(): void;
 }
@@ -59,11 +66,76 @@ export interface Connection {
 export interface DhtStatus {
   enabled: boolean;
   active: boolean;
+  /** the node has announced itself and can be found */
+  joined: boolean;
   /** peers the DHT has told us about */
   peers: number;
   /** bootstrap nodes we were pointed at */
   bootstrap: string[];
   error: string | null;
+}
+
+/**
+ * How many bytes may be waiting for a peer that is not reading.
+ *
+ * A peer that stops reading must not be able to fill this machine's memory.
+ * When the queue is over the cap the connection is dropped: a peer that
+ * cannot keep up is a peer we cannot serve.
+ */
+const MAX_SEND_BUFFER_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The way out to one peer.
+ *
+ * `write()` tells us when the socket's own buffer is full. Until it drains we
+ * hold what is left here instead of writing more, which is what keeps a slow
+ * peer from growing the buffer without bound.
+ */
+class Outbound {
+  private readonly queue: string[] = [];
+  private queued = 0;
+  private blocked = false;
+
+  constructor(private readonly pipe: BytePipe) {}
+
+  push(frame: string): void {
+    if (this.blocked) {
+      this.queue.push(frame);
+      this.queued += frame.length;
+      if (this.queued > MAX_SEND_BUFFER_BYTES) {
+        this.pipe.destroy();
+      }
+      return;
+    }
+
+    let accepted = false;
+    try {
+      accepted = this.pipe.write(frame);
+    } catch {
+      /* the peer went away mid-write */
+      return;
+    }
+    if (!accepted) this.blocked = true;
+  }
+
+  /** The socket has room again: send what was waiting. */
+  onDrain(): void {
+    this.blocked = false;
+    while (this.queue.length > 0) {
+      const frame = this.queue.shift() as string;
+      this.queued -= frame.length;
+      let accepted = false;
+      try {
+        accepted = this.pipe.write(frame);
+      } catch {
+        return;
+      }
+      if (!accepted) {
+        this.blocked = true;
+        return;
+      }
+    }
+  }
 }
 
 export interface TransportOptions {
@@ -75,8 +147,8 @@ export interface TransportOptions {
   /** DHT discovery and hole punching */
   dht: boolean;
   dhtBootstrap: string[];
-  /** 32-byte topic the node joins */
-  topic: Uint8Array;
+  /** the topics the node announces on: the global one, plus its shards */
+  topics: Uint8Array[];
   /** the chains this node holds, for the handshake */
   chains: () => ChainHead[];
   log?: (line: string) => void;
@@ -101,6 +173,7 @@ export class PeerServer extends EventEmitter {
   private dhtPeers = new Set<string>();
   private dhtError: string | null = null;
   private dhtActive = false;
+  private dhtJoined = false;
   private started = false;
 
   constructor(private readonly options: TransportOptions) {
@@ -128,6 +201,7 @@ export class PeerServer extends EventEmitter {
     return {
       enabled: this.options.dht,
       active: this.dhtActive,
+      joined: this.dhtJoined,
       peers: this.dhtPeers.size,
       bootstrap: this.options.dhtBootstrap,
       error: this.dhtError,
@@ -165,6 +239,7 @@ export class PeerServer extends EventEmitter {
   ): Connection {
     const id = randomBytes(8).toString("hex");
     const label = address ?? `peer:${transport?.slice(0, 8) ?? id}`;
+    const outbound = new Outbound(pipe);
 
     const connection: Connection = {
       id,
@@ -174,12 +249,10 @@ export class PeerServer extends EventEmitter {
       lastSeen: Date.now(),
       peer: null,
       transport,
+      nonce: toHex(crypto.getRandomValues(new Uint8Array(16))),
+      bound: false,
       send: (message) => {
-        try {
-          if (!pipe.destroyed) pipe.write(encodeFrame(message));
-        } catch {
-          /* the peer went away mid-write */
-        }
+        outbound.push(encodeFrame(message));
       },
       close: () => pipe.destroy(),
     };
@@ -187,10 +260,13 @@ export class PeerServer extends EventEmitter {
     this.connections.set(id, connection);
 
     const decoder = new FrameDecoder();
+    // One decoder for the whole connection: a multi-byte character can be
+    // split across two reads, and the remainder has to be kept.
+    const text = new TextDecoder("utf-8");
     pipe.on("data", (chunk: Uint8Array | string) => {
       connection.lastSeen = Date.now();
-      const text = typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
-      const { messages, overflow } = decoder.push(text);
+      const line = typeof chunk === "string" ? chunk : text.decode(chunk, { stream: true });
+      const { messages, overflow } = decoder.push(line);
       if (overflow) {
         pipe.destroy();
         return;
@@ -198,6 +274,7 @@ export class PeerServer extends EventEmitter {
       for (const message of messages) this.onMessage(connection, message);
     });
 
+    pipe.on("drain", () => outbound.onDrain());
     pipe.on("error", () => pipe.destroy());
 
     const done = () => {
@@ -214,21 +291,23 @@ export class PeerServer extends EventEmitter {
     return connection;
   }
 
-  private async sendHello(connection: Connection): Promise<void> {
+  private async sendHello(connection: Connection, peerNonce = ""): Promise<void> {
     try {
-      const nonce = toHex(crypto.getRandomValues(new Uint8Array(16)));
       const sig = await signHello(
         this.options.peer.privateKey,
         this.options.peer.publicKey,
         connection.address,
-        nonce,
+        connection.nonce,
+        peerNonce,
       );
+      if (peerNonce) connection.bound = true;
       connection.send({
         t: "hello",
-        v: 2,
+        v: PROTOCOL_VERSION,
         peer: this.options.peer.publicKey,
         addr: connection.address,
-        nonce,
+        nonce: connection.nonce,
+        peerNonce,
         sig,
         chains: this.options.chains(),
       });
@@ -269,12 +348,29 @@ export class PeerServer extends EventEmitter {
       return;
     }
 
-    const first = connection.peer === null;
-    connection.peer = message.peer;
-    this.emit("auth", connection, message.chains);
+    // A hello only counts once it has signed the nonce we sent. An opening
+    // hello carries no nonce of ours, so it proves the peer holds its key but
+    // not that it is talking to *this* connection: a hello captured elsewhere
+    // would look the same. The second hello carries the nonce the peer gave
+    // us, and that one cannot be replayed onto another connection.
+    const bound = message.peerNonce === connection.nonce;
 
-    // Answer a hello with a hello: the side that dialled may not have spoken yet.
-    if (first) await this.sendHello(connection);
+    if (!bound) {
+      // Their opening hello. Answer with one that carries their nonce, so
+      // they can bind to us in turn.
+      await this.sendHello(connection, message.nonce);
+      return;
+    }
+
+    if (!connection.bound) {
+      // We have their nonce now: bind ourselves to them.
+      await this.sendHello(connection, message.nonce);
+    }
+
+    if (!connection.peer) {
+      connection.peer = message.peer;
+      this.emit("auth", connection, message.chains);
+    }
   }
 
   // ----------------------------------------------------------------- outbound
@@ -367,10 +463,10 @@ export class PeerServer extends EventEmitter {
       await swarm.listen();
       this.log(`dht: announced as ${toHex(keyPair.publicKey).slice(0, 8)}`);
 
-      // Announce ourselves on the topic, then keep looking for others.
-      void this.announceTopic();
-      this.dhtTimer = setInterval(() => void this.lookupTopic(), DHT_LOOKUP_INTERVAL);
-      void this.lookupTopic();
+      // Announce ourselves on every topic, then keep looking for others.
+      void this.announceTopics();
+      this.dhtTimer = setInterval(() => void this.lookupTopics(), DHT_LOOKUP_INTERVAL);
+      void this.lookupTopics();
     } catch (error) {
       this.dhtError = (error as Error).message;
       this.log(`dht: unavailable (${this.dhtError})`);
@@ -378,39 +474,47 @@ export class PeerServer extends EventEmitter {
     }
   }
 
-  private async announceTopic(): Promise<void> {
-    if (!this.dht || !this.swarm) return;
-    try {
-      for await (const _reply of this.dht.announce(this.options.topic, this.swarm.keyPair)) {
-        // The iterator stays open while we are announced; draining it keeps
-        // the announcement alive.
-        void _reply;
+  private async announceTopics(): Promise<void> {
+    for (const topic of this.options.topics) {
+      if (!this.dht || !this.swarm) return;
+      try {
+        for await (const _reply of this.dht.announce(topic, this.swarm.keyPair)) {
+          // The iterator stays open while we are announced; draining it keeps
+          // the announcement alive.
+          void _reply;
+          if (!this.dhtJoined) {
+            this.dhtJoined = true;
+            this.emit("dht", this.dhtStatus());
+          }
+        }
+      } catch (error) {
+        this.dhtError = (error as Error).message;
+        this.log(`dht: announce failed (${this.dhtError})`);
       }
-    } catch (error) {
-      this.dhtError = (error as Error).message;
-      this.log(`dht: announce failed (${this.dhtError})`);
     }
   }
 
-  private async lookupTopic(): Promise<void> {
-    if (!this.dht || !this.swarm || this.dhtBusy) return;
-    this.dhtBusy = true;
-    try {
-      for await (const reply of this.dht.lookup(this.options.topic)) {
-        for (const peer of reply.peers ?? []) {
-          const key = toHex(peer.publicKey);
-          if (this.dhtPeers.has(key)) continue;
-          this.dhtPeers.add(key);
-          this.emit("dht-peer", key);
-          this.swarm.joinPeer(peer.publicKey);
+  private async lookupTopics(): Promise<void> {
+    for (const topic of this.options.topics) {
+      if (!this.dht || !this.swarm || this.dhtBusy) return;
+      this.dhtBusy = true;
+      try {
+        for await (const reply of this.dht.lookup(topic)) {
+          for (const peer of reply.peers ?? []) {
+            const key = toHex(peer.publicKey);
+            if (this.dhtPeers.has(key)) continue;
+            this.dhtPeers.add(key);
+            this.emit("dht-peer", key);
+            this.swarm.joinPeer(peer.publicKey);
+          }
         }
+      } catch (error) {
+        this.dhtError = (error as Error).message;
+        this.log(`dht: lookup failed (${this.dhtError})`);
+      } finally {
+        this.dhtBusy = false;
+        this.emit("dht", this.dhtStatus());
       }
-    } catch (error) {
-      this.dhtError = (error as Error).message;
-      this.log(`dht: lookup failed (${this.dhtError})`);
-    } finally {
-      this.dhtBusy = false;
-      this.emit("dht", this.dhtStatus());
     }
   }
 

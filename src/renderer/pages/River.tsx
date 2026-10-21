@@ -13,6 +13,7 @@ export function RiverPage({
   notify,
   onOpenProfile,
   onOpenNetwork,
+  writer,
 }: {
   snapshot: Snapshot;
   me: string;
@@ -22,6 +23,8 @@ export function RiverPage({
   notify: (message: string) => void;
   onOpenProfile: (pubkey: string) => void;
   onOpenNetwork: () => void;
+  /** the device key to write with; empty means the root key */
+  writer: string;
 }) {
   const iAmNamed = Boolean(snapshot.profiles[me]);
 
@@ -93,6 +96,7 @@ export function RiverPage({
           me={{ pubkey: me, name: snapshot.profiles[me]?.name ?? "you", hue: snapshot.profiles[me]?.hue ?? 200 }}
           chainSeq={snapshot.me?.seq ?? 0}
           publish={publish}
+          device={writer}
         />
       </div>
 

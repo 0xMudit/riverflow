@@ -166,6 +166,7 @@ function snapshot(includeSilt = false): Snapshot {
       posts: posts.length,
       events: posts.length + 8,
       follows: following.length,
+      following: following.length,
       retracted: posts.filter((post) => post.retracted).length,
       reactions: 2,
     },
@@ -375,6 +376,44 @@ const bridge: RiverBridge = {
     const root = posts.find((post) => post.id === postId);
     return { root: root ?? null, posts: root ? [root] : [] };
   },
+
+  thisDevice: async () => ({
+    publicKey: "d".repeat(64),
+    name: "preview",
+    authorised: true,
+    revoked: false,
+  }),
+
+  authoriseThisDevice: async (name) => bridge.publish("device", { device: "d".repeat(64), name }),
+
+  revokeDevice: async (device) => bridge.publish("device", { device, revoked: true }),
+
+  attachMedia: async (bytes, type) => ({ hash: "b".repeat(64), size: bytes.length, type }),
+
+  proof: async () => null,
+
+  draft: async (kind, body) => ({
+    author: ME,
+    scheme: "ed25519" as const,
+    seq: 0,
+    prev: "",
+    kind,
+    body,
+    createdAt: Date.now(),
+    id: "c".repeat(64),
+    digest: "c".repeat(64),
+    signing: "ed25519" as const,
+  }),
+
+  submit: async (event) => event,
+
+  wallet: async () => null,
+
+  useWallet: async () => undefined,
+
+  challenge: async () => ({ message: "river wants you to sign in", nonce: "ab" }),
+
+  signIn: async () => true,
 
   onLog: () => () => undefined,
   openExternal: () => undefined,

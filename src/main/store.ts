@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS events (
   id          TEXT PRIMARY KEY,
   author      TEXT NOT NULL,
   device      TEXT NOT NULL DEFAULT '',
+  scheme      TEXT NOT NULL DEFAULT 'ed25519',
   seq         INTEGER NOT NULL,
   prev        TEXT NOT NULL,
   kind        TEXT NOT NULL,
@@ -84,6 +85,7 @@ CREATE TABLE IF NOT EXISTS posts (
   reply_to       TEXT,
   root           TEXT,
   text           TEXT NOT NULL,
+  media          TEXT,
   created_at     INTEGER NOT NULL,
   edited_at      INTEGER,
   seq            INTEGER NOT NULL,
@@ -97,6 +99,15 @@ CREATE INDEX IF NOT EXISTS posts_created ON posts(created_at DESC);
 CREATE INDEX IF NOT EXISTS posts_author ON posts(author, created_at DESC);
 CREATE INDEX IF NOT EXISTS posts_reply ON posts(reply_to);
 CREATE INDEX IF NOT EXISTS posts_root ON posts(root);
+
+-- What a post said about a blob it carries: the hash and the type. Indexed so
+-- a blob arriving from a peer keeps the type its author declared.
+CREATE TABLE IF NOT EXISTS blob_refs (
+  hash   TEXT PRIMARY KEY,
+  type   TEXT NOT NULL,
+  size   INTEGER NOT NULL DEFAULT 0,
+  author TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS reactions (
   post_id TEXT NOT NULL,
@@ -175,6 +186,7 @@ CREATE TABLE IF NOT EXISTS devices (
   device    TEXT NOT NULL,
   name      TEXT NOT NULL DEFAULT '',
   seq       INTEGER NOT NULL,
+  revoked   INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   PRIMARY KEY (author, device)
 );
@@ -267,6 +279,7 @@ export class Store {
     this.db.exec("PRAGMA busy_timeout = 4000");
     this.db.exec(SCHEMA);
     this.migrate();
+    this.addColumns();
     this.db.exec(INDEXES);
     this.sealPlaintext();
   }
@@ -392,6 +405,31 @@ export class Store {
     );
   }
 
+  /**
+   * Columns added after a store was first written. SQLite can add a column
+   * without rewriting the table, so this never costs an event.
+   */
+  private addColumns(): void {
+    this.addColumn("posts", "media", "TEXT");
+    this.addColumn("posts", "device", "TEXT NOT NULL DEFAULT ''");
+    this.addColumn("devices", "revoked", "INTEGER NOT NULL DEFAULT 0");
+    // The scheme says how an event was signed. Without it a wallet's event
+    // cannot be verified again once it is on disk.
+    this.addColumn("events", "scheme", "TEXT NOT NULL DEFAULT 'ed25519'");
+  }
+
+  private addColumn(table: string, column: string, definition: string): void {
+    const columns = this.db
+      .prepare(`PRAGMA table_info(${table})`)
+      .all() as Array<{ name: string }>;
+    if (columns.some((entry) => entry.name === column)) return;
+    try {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    } catch {
+      /* another process got there first */
+    }
+  }
+
   private prep(sql: string) {
     let statement = this.stmt.get(sql);
     if (!statement) {
@@ -438,7 +476,7 @@ export class Store {
   private openRow<T>(row: T): T {
     if (!this.dataKey) return row;
     const record = row as Record<string, unknown>;
-    for (const column of ["text", "body", "name", "bio", "retract_reason"]) {
+    for (const column of ["text", "body", "name", "bio", "retract_reason", "media"]) {
       const value = record[column];
       if (typeof value === "string" && isSealed(value)) {
         record[column] = this.open(value);
@@ -493,9 +531,16 @@ export class Store {
    * Verify and append. Everything is checked before a byte is written: shape,
    * log position, previous link, signature, and — for a delegated device —
    * that the person named in the event actually authorised that key.
+   *
+   * Two copies of the same event can arrive at once: a peer may answer the
+   * same request twice, and gossip has no idea what another node already
+   * holds. The append is therefore the thing that decides, not the check
+   * before it, and losing the race is a duplicate rather than a failure.
    */
   async ingest(event: Event): Promise<IngestResult> {
-    const shape = validateShape(event, Number.POSITIVE_INFINITY);
+    // A real clock, not Infinity: an event dated in the future would never age
+    // out of a ranked feed, so a peer could pin itself to the top forever.
+    const shape = validateShape(event, Date.now());
     if (shape) return { status: "invalid", reason: shape };
 
     if (this.hasEvent(event.id)) return { status: "duplicate" };
@@ -522,18 +567,41 @@ export class Store {
       return { status: "invalid", reason: "signature does not match author and content" };
     }
 
-    this.applyEvent(event);
+    try {
+      this.applyEvent(event);
+    } catch (error) {
+      // Another copy of this event, or a fork, got in while the signature was
+      // being checked. The append decides, not the check before it.
+      const conflict = this.conflictOf(event, error);
+      if (conflict === "duplicate") return { status: "duplicate" };
+      if (conflict === "fork") {
+        return { status: "invalid", reason: "fork: seq already claimed with a different event" };
+      }
+      throw error;
+    }
     return { status: "added" };
+  }
+
+  /**
+   * Why an append did not go in: the same event twice, or a fork at a seq
+   * that is already claimed. Anything else is a real error.
+   */
+  private conflictOf(event: Event, error: unknown): "duplicate" | "fork" | null {
+    const message = (error as Error)?.message ?? "";
+    if (!message.includes("UNIQUE constraint failed")) return null;
+    if (this.hasEvent(event.id)) return "duplicate";
+    return "fork";
   }
 
   private applyEvent(event: Event): void {
     this.tx(() => {
       this.run(
-        `INSERT INTO events (id, author, device, seq, prev, kind, body, created_at, sig, received_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO events (id, author, device, scheme, seq, prev, kind, body, created_at, sig, received_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         event.id,
         event.author,
         event.device ?? "",
+        event.scheme ?? "ed25519",
         event.seq,
         event.prev,
         event.kind,
@@ -577,24 +645,48 @@ export class Store {
     switch (event.kind) {
       case "post": {
         const replyTo = body.replyTo ?? null;
-        const parent = replyTo ? (this.one<{ root: string | null }>("SELECT root FROM posts WHERE id = ?", replyTo) ?? null) : null;
-        const root = replyTo ? (parent?.root ?? replyTo) : null;
+        // The thread root is the post at the top of the conversation. When the
+        // parent has not arrived yet we do not know it, so the root stays empty
+        // and is fixed when the parent lands: arrival order is arbitrary and
+        // the view has to survive that.
+        const parent = replyTo
+          ? this.one<{ root: string | null }>("SELECT root FROM posts WHERE id = ?", replyTo)
+          : null;
+        const root = replyTo ? (parent ? (parent.root ?? replyTo) : null) : null;
 
         this.run(
-          `INSERT INTO posts (id, author, reply_to, root, text, created_at, seq)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO posts (id, author, reply_to, root, text, media, device, created_at, seq)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO NOTHING`,
           event.id,
           event.author,
           replyTo,
           root,
           this.seal(body.text ?? "", "posts.text"),
+          this.seal(JSON.stringify(body.media ?? []), "posts.media"),
+          event.device ?? "",
           event.createdAt,
           event.seq,
         );
+        // Remember what the post said about each blob it carries, so a blob
+        // arriving later keeps the type its author declared.
+        for (const ref of body.media ?? []) {
+          if (!isBlobRef(ref)) continue;
+          this.run(
+            `INSERT INTO blob_refs (hash, type, size, author) VALUES (?, ?, ?, ?)
+             ON CONFLICT(hash) DO UPDATE SET type = excluded.type, size = excluded.size`,
+            ref.hash,
+            ref.type,
+            ref.size,
+            event.author,
+          );
+        }
         if (replyTo && parent) {
           this.run("UPDATE posts SET reply_count = reply_count + 1 WHERE id = ?", replyTo);
         }
+        // Replies that arrived before this post were waiting for it: put them
+        // in the right thread and count them.
+        this.rethread(event.id, replyTo === null ? event.id : root);
         this.replayDeferred(event.id);
         if (replyTo) {
           const owner = this.one<{ author: string }>("SELECT author FROM posts WHERE id = ?", replyTo);
@@ -607,7 +699,18 @@ export class Store {
 
       case "edit": {
         const target = body.target ?? "";
-        const result = this.run(
+        const post = this.one<{ author: string }>("SELECT author FROM posts WHERE id = ?", target);
+        if (!post) {
+          // The post has not arrived yet. Park it and apply it when it does.
+          this.defer(event.id, target);
+          break;
+        }
+        if (post.author !== event.author) {
+          // Not the author's post. The event stays in the log — the ledger
+          // records the attempt — but the words are not theirs to change.
+          break;
+        }
+        this.run(
           `UPDATE posts SET text = ?, edited_at = ?, seq = ?
            WHERE id = ? AND author = ? AND retracted_at IS NULL`,
           this.seal(body.text ?? "", "posts.text"),
@@ -616,13 +719,20 @@ export class Store {
           target,
           event.author,
         );
-        if (result.changes === 0) this.defer(event.id, target);
         break;
       }
 
       case "retract": {
         const target = body.target ?? "";
-        const result = this.run(
+        const post = this.one<{ author: string }>("SELECT author FROM posts WHERE id = ?", target);
+        if (!post) {
+          this.defer(event.id, target);
+          break;
+        }
+        if (post.author !== event.author) {
+          break;
+        }
+        this.run(
           `UPDATE posts SET retracted_at = ?, retracted_seq = ?, retract_reason = ?
            WHERE id = ? AND author = ? AND retracted_at IS NULL`,
           event.createdAt,
@@ -633,7 +743,6 @@ export class Store {
           target,
           event.author,
         );
-        if (result.changes === 0) this.defer(event.id, target);
         break;
       }
 
@@ -645,23 +754,25 @@ export class Store {
           break;
         }
         if ((body.emoji ?? "") === "") {
+          // Taking the ripple back. The author is not told about it: they
+          // were told when it was given.
           const removed = this.run("DELETE FROM reactions WHERE post_id = ? AND author = ?", target, event.author);
           if (removed.changes > 0) {
             this.run("UPDATE posts SET reaction_count = MAX(reaction_count - 1, 0) WHERE id = ?", target);
           }
-        } else {
-          const existing = this.one("SELECT 1 AS ok FROM reactions WHERE post_id = ? AND author = ?", target, event.author);
-          this.run(
-            `INSERT INTO reactions (post_id, author, emoji, seq) VALUES (?, ?, ?, ?)
-             ON CONFLICT(post_id, author) DO UPDATE SET emoji = excluded.emoji, seq = excluded.seq`,
-            target,
-            event.author,
-            body.emoji ?? "≈",
-            event.seq,
-          );
-          if (!existing) {
-            this.run("UPDATE posts SET reaction_count = reaction_count + 1 WHERE id = ?", target);
-          }
+          break;
+        }
+        const existing = this.one("SELECT 1 AS ok FROM reactions WHERE post_id = ? AND author = ?", target, event.author);
+        this.run(
+          `INSERT INTO reactions (post_id, author, emoji, seq) VALUES (?, ?, ?, ?)
+           ON CONFLICT(post_id, author) DO UPDATE SET emoji = excluded.emoji, seq = excluded.seq`,
+          target,
+          event.author,
+          body.emoji ?? "≈",
+          event.seq,
+        );
+        if (!existing) {
+          this.run("UPDATE posts SET reaction_count = reaction_count + 1 WHERE id = ?", target);
         }
         this.notify("reaction", event, post.author, target, body.emoji ?? "≈");
         break;
@@ -704,12 +815,16 @@ export class Store {
 
       case "device": {
         this.run(
-          `INSERT INTO devices (author, device, name, seq, created_at) VALUES (?, ?, ?, ?, ?)
-           ON CONFLICT(author, device) DO UPDATE SET name = excluded.name, seq = excluded.seq`,
+          `INSERT INTO devices (author, device, name, seq, revoked, created_at) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(author, device) DO UPDATE SET
+             name = excluded.name,
+             seq = excluded.seq,
+             revoked = excluded.revoked`,
           event.author,
           body.device ?? "",
           body.name ?? "",
           event.seq,
+          body.revoked ? 1 : 0,
           event.createdAt,
         );
         break;
@@ -753,13 +868,47 @@ export class Store {
     }
   }
 
+  /**
+   * Put a post's replies in the right thread, and count them.
+   *
+   * A reply can arrive before the post it answers, and a reply to a reply can
+   * arrive before either. The root of the conversation is decided when the top
+   * post lands, and every reply below it takes that root — all the way down,
+   * because the whole subtree moves when the root moves.
+   *
+   * `root` is null when the thread is not known yet: the parent has not
+   * arrived. Those replies stay invisible in the feed until it does, and are
+   * threaded then.
+   */
+  private rethread(postId: string, root: string | null, depth = 0): void {
+    if (depth > 64) return;
+    const children = this.all<{ id: string }>("SELECT id FROM posts WHERE reply_to = ?", postId);
+    if (children.length === 0) return;
+
+    for (const { id } of children) {
+      this.run("UPDATE posts SET root = ? WHERE id = ?", root, id);
+    }
+    // Absolute, not an increment: the count is the truth, however the
+    // replies arrived.
+    this.run("UPDATE posts SET reply_count = ? WHERE id = ?", children.length, postId);
+
+    for (const { id } of children) {
+      this.rethread(id, root, depth + 1);
+    }
+  }
+
   // ----------------------------------------------------------------- devices
 
   deviceRegistered(author: string, device: string): boolean {
     if (!device) return true;
-    return Boolean(
-      this.one("SELECT 1 AS ok FROM devices WHERE author = ? AND device = ?", author, device),
+    const row = this.one<{ revoked: number }>(
+      "SELECT revoked FROM devices WHERE author = ? AND device = ?",
+      author,
+      device,
     );
+    // A device that was never registered cannot write; a device whose
+    // authority was withdrawn cannot write either.
+    return row !== null && !row.revoked;
   }
 
   devicesFor(author: string): DeviceView[] {
@@ -771,6 +920,7 @@ export class Store {
       name: String(row.name ?? ""),
       seq: Number(row.seq),
       createdAt: Number(row.created_at),
+      revoked: Boolean(row.revoked),
     }));
   }
 
@@ -881,6 +1031,12 @@ export class Store {
     return Boolean(this.one("SELECT 1 AS ok FROM blobs WHERE hash = ?", hash));
   }
 
+  /** The type a post declared for this blob, if a post has mentioned it. */
+  mediaType(hash: string): string | null {
+    const row = this.one<{ type: string }>("SELECT type FROM blob_refs WHERE hash = ?", hash);
+    return row ? String(row.type) : null;
+  }
+
   blobCount(): number {
     return Number(this.one<{ n: number }>("SELECT COUNT(*) AS n FROM blobs")?.n ?? 0);
   }
@@ -927,6 +1083,44 @@ export class Store {
       device: String(row.device),
       seq: Number(row.seq),
     }));
+  }
+
+  /** One want, looked up by key. The table is scanned on every head. */
+  wantFor(author: string, device: string): { author: string; device: string; seq: number; at: number } | null {
+    const row = this.one<Row>("SELECT author, device, seq, at FROM wanted WHERE author = ? AND device = ?", author, device);
+    return row
+      ? {
+          author: String(row.author),
+          device: String(row.device),
+          seq: Number(row.seq),
+          at: Number(row.at),
+        }
+      : null;
+  }
+
+  /** Drop the wants whose chain has arrived in full. */
+  clearSatisfiedWants(): number {
+    const rows = this.all<Row>("SELECT author, device, seq FROM wanted");
+    let cleared = 0;
+    for (const row of rows) {
+      const author = String(row.author);
+      const device = String(row.device);
+      const head = this.head(author, device);
+      if (head && head.seq >= Number(row.seq)) {
+        this.clearWant(author, device);
+        cleared++;
+      }
+    }
+    return cleared;
+  }
+
+  /**
+   * Drop the wants nobody has answered in a long time. A chain that cannot be
+   * had must not be wanted for ever.
+   */
+  expireWants(olderThanMs: number): number {
+    const result = this.run("DELETE FROM wanted WHERE at < ?", Date.now() - olderThanMs);
+    return Number(result.changes ?? 0);
   }
 
   clearWant(author: string, device: string): void {
@@ -1038,16 +1232,22 @@ export class Store {
     }
 
     const rootId = cursor ? String(cursor.id) : postId;
+    // The thread is the subtree below the root, found by walking `reply_to`.
+    // The `root` column is a cache of that walk and can still be empty for a
+    // reply whose parent has not arrived, so the walk is done again here.
     const rows = this.all<Row>(
-      `SELECT p.*, EXISTS(SELECT 1 FROM reactions r WHERE r.post_id = p.id AND r.author = ?) AS mine
-       FROM posts p
-       WHERE (p.id = ? OR p.root = ?)
-         AND (? = 1 OR p.retracted_at IS NULL)
+      `WITH RECURSIVE thread(id) AS (
+         SELECT id FROM posts WHERE id = ?
+         UNION
+         SELECT p.id FROM posts p JOIN thread t ON p.reply_to = t.id
+       )
+       SELECT p.*, EXISTS(SELECT 1 FROM reactions r WHERE r.post_id = p.id AND r.author = ?) AS mine
+       FROM posts p JOIN thread t ON p.id = t.id
+       WHERE (? = 1 OR p.retracted_at IS NULL)
          AND p.author NOT IN (SELECT target FROM mutes)
        ORDER BY p.created_at ASC, p.id ASC`,
+      rootId,
       viewer,
-      rootId,
-      rootId,
       silt,
     );
 
@@ -1281,13 +1481,17 @@ export class Store {
     ).map((row) => row.follower);
   }
 
-  stats(): Stats {
-    const one = (sql: string) => Number(this.one<{ n: number }>(sql)?.n ?? 0);
+  stats(viewer?: string): Stats {
+    const one = (sql: string, ...params: Array<string | number | null>) =>
+      Number(this.one<{ n: number }>(sql, ...params)?.n ?? 0);
     return {
       authors: one("SELECT COUNT(DISTINCT author) AS n FROM chains"),
       posts: one("SELECT COUNT(*) AS n FROM posts"),
       events: one("SELECT COUNT(*) AS n FROM events"),
       follows: one("SELECT COUNT(*) AS n FROM follows WHERE active = 1"),
+      following: viewer
+        ? one("SELECT COUNT(*) AS n FROM follows WHERE follower = ? AND active = 1", viewer)
+        : 0,
       retracted: one("SELECT COUNT(*) AS n FROM posts WHERE retracted_at IS NOT NULL"),
       reactions: one("SELECT COUNT(*) AS n FROM reactions"),
     };
@@ -1433,7 +1637,7 @@ export class Store {
   rebuild(): void {
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db.exec("DELETE FROM posts; DELETE FROM profiles; DELETE FROM follows; DELETE FROM reactions; DELETE FROM deferred; DELETE FROM trail; DELETE FROM notifications; DELETE FROM devices;");
+      this.db.exec("DELETE FROM posts; DELETE FROM profiles; DELETE FROM follows; DELETE FROM reactions; DELETE FROM deferred; DELETE FROM trail; DELETE FROM notifications; DELETE FROM devices; DELETE FROM blob_refs;");
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -1448,6 +1652,13 @@ export class Store {
 }
 
 function toPostView(row: Row): PostView {
+  let media: BlobRef[] | undefined;
+  try {
+    const parsed = JSON.parse(String(row.media ?? "[]")) as BlobRef[];
+    if (Array.isArray(parsed) && parsed.length > 0) media = parsed.filter(isBlobRef);
+  } catch {
+    media = undefined;
+  }
   return {
     id: String(row.id),
     author: String(row.author),
@@ -1463,6 +1674,8 @@ function toPostView(row: Row): PostView {
     replyCount: Number(row.reply_count ?? 0),
     viewerReacted: Boolean(row.mine),
     verified: true,
+    ...(row.device ? { device: String(row.device) } : {}),
+    ...(media && media.length > 0 ? { media } : {}),
   };
 }
 
@@ -1489,6 +1702,9 @@ function toEvent(row: Row): Event {
     id: String(row.id),
     author: String(row.author),
     device: String(row.device ?? ""),
+    // How it was signed. Without it a wallet's event cannot be verified
+    // again once it has been read off the disk.
+    ...(row.scheme ? { scheme: String(row.scheme) as Event["scheme"] } : {}),
     seq: Number(row.seq),
     prev: String(row.prev),
     kind: String(row.kind) as EventKind,

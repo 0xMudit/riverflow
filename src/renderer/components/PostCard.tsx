@@ -166,6 +166,12 @@ export function PostCard({
             <span>{shortAddr(post.author)}</span>
             <span style={{ opacity: 0.4 }}>·</span>
             <span title={`event ${post.seq} in ${author.name}'s chain`}>seq {post.seq}</span>
+            {post.device && (
+              <>
+                <span style={{ opacity: 0.4 }}>·</span>
+                <span title={`written by the device ${post.device}`}>device {shortAddr(post.device)}</span>
+              </>
+            )}
           </div>
 
           {editing ? (
@@ -219,9 +225,28 @@ export function PostCard({
               </div>
             </div>
           ) : (
-            <p className="post-text" style={{ marginTop: 7 }}>
-              {post.text}
-            </p>
+            <>
+              <p className="post-text" style={{ marginTop: 7 }}>
+                {post.text}
+              </p>
+              {post.media && post.media.length > 0 && (
+                <div className="post-media">
+                  {post.media.map((item) => (
+                    <img
+                      key={item.hash}
+                      src={`river://blob/${item.hash}`}
+                      alt=""
+                      loading="lazy"
+                      style={
+                        item.width && item.height
+                          ? { aspectRatio: `${item.width} / ${item.height}` }
+                          : undefined
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+            </>
           )}
 
           <footer

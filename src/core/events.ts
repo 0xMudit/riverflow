@@ -8,10 +8,12 @@
  */
 import { canonical, fromHex, sha256Hex, ZERO_HASH } from "./canonical";
 import { sign, verify } from "./crypto";
+import { ETH_ADDRESS, signatureBytes, verifyPersonalSignature } from "./eth";
 import type { Event, EventBody, EventKind } from "./types";
 
 const HEX_KEY = /^[0-9a-f]{64}$/; // 32-byte public key / id
 const HEX_SIG = /^[0-9a-f]{128}$/; // 64-byte ed25519 signature
+const HEX_SIG_ETH = /^[0-9a-f]{130}$/; // 65-byte secp256k1 signature
 
 export const LIMITS = {
   text: 2000,
@@ -22,7 +24,7 @@ export const LIMITS = {
 
 export type EventDraft = Pick<
   Event,
-  "author" | "device" | "seq" | "prev" | "kind" | "body" | "createdAt"
+  "author" | "device" | "scheme" | "seq" | "prev" | "kind" | "body" | "createdAt"
 >;
 
 export function eventPreimage(draft: EventDraft): string {
@@ -31,6 +33,9 @@ export function eventPreimage(draft: EventDraft): string {
     // The device is part of the identity of the event: the same words signed by
     // a phone and a laptop are two different events, not one rewritten event.
     ...(draft.device ? { device: draft.device } : {}),
+    // The scheme is part of it too, but only when it is not the default, so an
+    // event written before wallets existed keeps the id it always had.
+    ...(draft.scheme && draft.scheme !== "ed25519" ? { scheme: draft.scheme } : {}),
     seq: draft.seq,
     prev: draft.prev,
     kind: draft.kind,
@@ -57,10 +62,25 @@ export async function createEvent(
 /** Recompute the id and check the signature. Pure and offline. */
 export async function verifyEvent(event: Event): Promise<boolean> {
   if (!event || typeof event !== "object") return false;
-  if (!HEX_KEY.test(event.id) || !HEX_KEY.test(event.author) || !HEX_SIG.test(event.sig)) return false;
+  if (!HEX_KEY.test(event.id)) return false;
   if (event.device !== undefined && event.device !== "" && !HEX_KEY.test(event.device)) return false;
+
   const expected = await eventId(event);
   if (expected !== event.id) return false;
+
+  if (event.scheme === "eth") {
+    // A wallet signs the id with personal_sign; the address that recovers is
+    // the author, so the wallet cannot write as anybody else.
+    if (!ETH_ADDRESS.test(event.author)) return false;
+    if (!HEX_SIG_ETH.test(event.sig)) return false;
+    return verifyPersonalSignature(
+      event.author,
+      fromHex(event.id),
+      signatureBytes(event.sig),
+    );
+  }
+
+  if (!HEX_KEY.test(event.author) || !HEX_SIG.test(event.sig)) return false;
   // A delegated device signs for the person, not for itself.
   const signer = event.device || event.author;
   return verify(signer, fromHex(event.id), event.sig);
@@ -69,8 +89,16 @@ export async function verifyEvent(event: Event): Promise<boolean> {
 export function validateShape(event: Event, now = Date.now()): string | null {
   if (!event || typeof event !== "object") return "event is not an object";
   if (!HEX_KEY.test(event.id)) return "id must be 32-byte hex";
-  if (!HEX_KEY.test(event.author)) return "author must be 32-byte hex";
-  if (!HEX_SIG.test(event.sig)) return "signature must be 64-byte hex";
+  if (event.scheme === "eth") {
+    if (!ETH_ADDRESS.test(event.author)) return "author must be an address";
+    if (!HEX_SIG_ETH.test(event.sig)) return "signature must be 65 bytes";
+  } else {
+    if (!HEX_KEY.test(event.author)) return "author must be 32-byte hex";
+    if (!HEX_SIG.test(event.sig)) return "signature must be 64-byte hex";
+  }
+  if (event.scheme !== undefined && event.scheme !== "ed25519" && event.scheme !== "eth") {
+    return "unknown signature scheme";
+  }
   if (!Number.isInteger(event.seq) || event.seq < 0) return "seq must be a non-negative integer";
   if (event.seq === 0 ? event.prev !== "" : !HEX_KEY.test(event.prev)) {
     return "prev must be empty at seq 0 and a hash afterwards";
@@ -121,6 +149,9 @@ export function validateShape(event: Event, now = Date.now()): string | null {
       if (body.device === event.author) return "the root key needs no authorisation";
       if (event.device) return "a device cannot authorise another device";
       if (body.name !== undefined && body.name.length > LIMITS.name) return "device name too long";
+      if (body.revoked !== undefined && typeof body.revoked !== "boolean") {
+        return "revoked must be true or false";
+      }
       return null;
     }
     default:

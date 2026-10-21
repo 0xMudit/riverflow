@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { LIMITS } from "@/core/events";
+import type { BlobRef } from "@/core/types";
 import type { PublishFn } from "../useNode";
 import { Avatar } from "./Avatar";
 
 /**
- * The composer. It builds one signed event and appends it to your own chain.
+ * The composer. It builds one signed event and appends to your chain.
  * No draft is saved: until you mean it, a thought is not part of the record.
+ * Media is handed to the node first, which checks it against its hash and
+ * keeps it under that hash — the event carries the reference, not the bytes.
  */
 export function Composer({
   me,
@@ -15,6 +18,7 @@ export function Composer({
   onCancelReply,
   autoFocus,
   compact,
+  device,
 }: {
   me: { pubkey: string; name: string; hue: number } | null;
   chainSeq?: number;
@@ -23,11 +27,16 @@ export function Composer({
   onCancelReply?: () => void;
   autoFocus?: boolean;
   compact?: boolean;
+  /** the device key to write with; empty means the root key */
+  device?: string;
 }) {
   const [text, setText] = useState("");
+  const [media, setMedia] = useState<BlobRef[]>([]);
+  const [previews, setPreviews] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const area = useRef<HTMLTextAreaElement>(null);
+  const picker = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (autoFocus) area.current?.focus();
@@ -40,7 +49,43 @@ export function Composer({
     element.style.height = `${Math.min(element.scrollHeight, 320)}px`;
   }, [text]);
 
+  useEffect(
+    () => () => {
+      for (const preview of previews) URL.revokeObjectURL(preview);
+    },
+    [previews],
+  );
+
   const remaining = LIMITS.text - text.length;
+
+  const attach = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setBusy(true);
+    setError(null);
+    try {
+      for (const item of Array.from(files)) {
+        const bytes = new Uint8Array(await item.arrayBuffer());
+        const box = await dimensions(item);
+        const size = await window.river.attachMedia(bytes, item.type, box.width, box.height);
+        setMedia((current) => [...current, size]);
+        setPreviews((current) => [...current, URL.createObjectURL(item)]);
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "could not attach that");
+    } finally {
+      setBusy(false);
+      if (picker.current) picker.current.value = "";
+    }
+  };
+
+  const drop = (index: number) => {
+    setMedia((current) => current.filter((_, position) => position !== index));
+    setPreviews((current) => {
+      const next = current.filter((_, position) => position !== index);
+      URL.revokeObjectURL(current[index] as string);
+      return next;
+    });
+  };
 
   const send = async () => {
     const body = text.trim();
@@ -48,8 +93,18 @@ export function Composer({
     setBusy(true);
     setError(null);
     try {
-      await publish("post", { text: body, ...(replyTo ? { replyTo: replyTo.id } : {}) });
+      await publish(
+        "post",
+        {
+          text: body,
+          ...(replyTo ? { replyTo: replyTo.id } : {}),
+          ...(media.length > 0 ? { media } : {}),
+        },
+        device,
+      );
       setText("");
+      setMedia([]);
+      setPreviews([]);
       onCancelReply?.();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "could not seal that post");
@@ -72,6 +127,35 @@ export function Composer({
       <div style={{ display: "flex", gap: 11 }}>
         <Avatar name={me?.name ?? "you"} hue={me?.hue ?? 200} size={compact ? 26 : 32} />
         <div style={{ flex: 1, minWidth: 0 }}>
+          {previews.length > 0 && (
+            <div style={{ display: "flex", gap: 8, marginBottom: 9, flexWrap: "wrap" }}>
+              {previews.map((preview, index) => (
+                <div key={preview} style={{ position: "relative" }}>
+                  <img
+                    src={preview}
+                    alt=""
+                    style={{
+                      width: 88,
+                      height: 88,
+                      objectFit: "cover",
+                      borderRadius: 8,
+                      border: "1px solid var(--line)",
+                      display: "block",
+                    }}
+                  />
+                  <button
+                    className="btn btn-ghost"
+                    style={{ position: "absolute", top: 3, right: 3, padding: "0 5px", fontSize: 10 }}
+                    onClick={() => drop(index)}
+                    aria-label="Remove this image"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
           <textarea
             ref={area}
             className="textarea"
@@ -102,6 +186,23 @@ export function Composer({
               <span className="meta" style={{ opacity: 0.55 }}>
                 ctrl ↵
               </span>
+              <input
+                ref={picker}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                onChange={(event) => void attach(event.target.files)}
+              />
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: 11.5 }}
+                disabled={busy}
+                onClick={() => picker.current?.click()}
+                title="Attach an image; it is stored by the hash of its bytes"
+              >
+                + image
+              </button>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               {chainSeq !== undefined && (
@@ -120,4 +221,16 @@ export function Composer({
       </div>
     </div>
   );
+}
+
+/** The size of an image, so the feed can lay it out before it loads. */
+async function dimensions(file: File): Promise<{ width?: number; height?: number }> {
+  try {
+    const bitmap = await createImageBitmap(file);
+    const size = { width: bitmap.width, height: bitmap.height };
+    bitmap.close();
+    return size;
+  } catch {
+    return {};
+  }
 }

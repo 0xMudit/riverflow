@@ -39,6 +39,8 @@ export interface EventBody {
   unfollow?: boolean;
   /** device: the key being authorised to write for this identity */
   device?: string;
+  /** device: the owner is withdrawing that authority */
+  revoked?: boolean;
   /** post: media attached, by content hash */
   media?: BlobRef[];
 }
@@ -52,11 +54,19 @@ export interface BlobRef {
   height?: number;
 }
 
+/** How an author signs. The default is ed25519; "eth" is a wallet key. */
+export type EventScheme = "ed25519" | "eth";
+
 export interface Event {
   /** sha256 over the canonical form of {author, device, seq, prev, kind, body, createdAt} */
   id: string;
   /** ed25519 public key, hex. This is the account. */
   author: string;
+  /**
+   * The signature scheme the author used. Absent means ed25519, so an event
+   * written before wallets existed keeps the id it always had.
+   */
+  scheme?: EventScheme;
   /**
    * The device key that signed this event, when it is not the root key.
    * Empty means the root key wrote it. Each device keeps its own chain, so
@@ -87,6 +97,8 @@ export interface DeviceView {
   name: string;
   seq: number;
   createdAt: number;
+  /** the owner has withdrawn this device's authority */
+  revoked: boolean;
 }
 
 export type IngestStatus =
@@ -99,6 +111,28 @@ export type IngestStatus =
 export interface IngestResult {
   status: IngestStatus;
   reason?: string;
+}
+
+/**
+ * An event the node has prepared but not signed.
+ *
+ * When the signer is a wallet, the key lives in the wallet and not here: the
+ * node works out where the event belongs and what its id will be, and the
+ * person signs that id in their wallet.
+ */
+export interface EventDraftView {
+  author: string;
+  scheme: EventScheme;
+  seq: number;
+  prev: string;
+  kind: EventKind;
+  body: EventBody;
+  createdAt: number;
+  id: string;
+  /** the bytes to sign, hex */
+  digest: string;
+  /** how the signer must sign them */
+  signing: "ed25519" | "personal_sign";
 }
 
 export interface ProfileView {
@@ -126,6 +160,10 @@ export interface PostView {
   viewerReacted: boolean;
   /** every stored event has a valid signature by construction */
   verified: boolean;
+  /** media attached, addressed by the hash of its bytes */
+  media?: BlobRef[];
+  /** the device key that wrote it, when it was not the root key */
+  device?: string;
 }
 
 export interface PeerView {
@@ -154,6 +192,8 @@ export interface Stats {
   posts: number;
   events: number;
   follows: number;
+  /** how many people the viewer follows */
+  following: number;
   retracted: number;
   reactions: number;
 }

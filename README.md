@@ -118,6 +118,36 @@ written before sealing existed is sealed in place the first time a node with a
 data key opens it, and vacuumed afterwards, so the old cleartext leaves the
 file with it.
 
+## Wallets
+
+People already carry keys: in MetaMask, in Rabby, in a hardware wallet, in a
+seed phrase they wrote down. River accepts them.
+
+Any wallet that speaks EIP-1193 — MetaMask, Rabby, Brave, anything that answers
+`eth_requestAccounts` — can be an author. The signing is EIP-191
+`personal_sign` over the event's id, and the address the signature recovers to
+*is* the author, so the wallet cannot write as anybody else. The event model
+gained a second scheme for this: `scheme: "eth"` on the event, with a 65-byte
+signature instead of 64. Everything else — the hash chain, the Merkle
+checkpoints, the device subkeys, the whole ledger — works the same.
+
+Two things follow from that, and both matter:
+
+- **A wallet is optional.** The default is still the ed25519 key in the
+  operating system's keychain, and nobody needs a wallet to use River. The
+  wallet is another way to hold the same authority, not a dependency on
+  anybody's company. River does not phone home, does not require an account,
+  and does not care who made the wallet.
+- **Signing in is signing.** There is no server to log in to, so "sign in" is
+  the thing people already know: the node makes a statement with a one-shot
+  nonce, the wallet signs it, and the node checks the signature. That is
+  EIP-4361 without the chain, and it is what a web reader would use.
+
+The key never leaves the wallet. The node prepares the event — where it goes
+in the chain, what its id will be — and the window asks the wallet to sign
+that id; the node checks the signature and files it. The window never sees a
+private key, and neither does the node.
+
 ## The security model
 
 - The ed25519 private key is generated on this machine and sealed with the OS
@@ -140,8 +170,9 @@ file with it.
 ```bash
 npm install
 npm run dev        # the desktop app
-npm test           # 73 ledger invariants (tampering, forks, disorder, silt, rebuild,
-                   #   merkle proofs, device keys, blobs, notifications, migration)
+npm test           # 134 ledger invariants (tampering, forks, disorder, silt, rebuild,
+                   #   merkle proofs, device keys, blobs, notifications, migration,
+                   #   sealed-at-rest, wallet signatures and sign-in)
 npm run demo       # two real nodes syncing over TCP, in one terminal
 npm run dht        # two real nodes finding each other through a DHT, no address typed in
 npm run bootstrap  # a DHT node of your own
@@ -159,6 +190,17 @@ npx tsx scripts/peer.ts --name mira --port 7400 --peers 127.0.0.1:7331 --demo
 
 `npm run drive` launches the app under Playwright, writes a few posts, brings
 that second node online and screenshots the result into `shots/`.
+
+There is a terminal client too, and it is a real node: the same store, the same
+key, the same protocol.
+
+```bash
+npx tsx src/cli/index.ts init                 # create an identity
+npx tsx src/cli/index.ts post "hello there"    # write to your log
+npx tsx src/cli/index.ts feed                 # what you see when you look
+npx tsx src/cli/index.ts serve --port 7331    # stay online for other nodes
+npx tsx src/cli/index.ts help                 # everything else
+```
 
 ## What "nobody can take this down" actually means
 

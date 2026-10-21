@@ -1,7 +1,9 @@
 import { useState } from "react";
-import type { IdentityInfo } from "@/core/bridge";
-import type { Snapshot } from "@/core/types";
+import type { IdentityInfo, ThisDevice, WalletInfo } from "@/core/bridge";
+import type { DeviceView, Snapshot } from "@/core/types";
 import { shortAddr } from "../format";
+import { type Eip1193Provider } from "../wallet";
+import { WalletPanel } from "./WalletPanel";
 import { Avatar } from "./Avatar";
 import type { View } from "../App";
 import type { PublishFn } from "../useNode";
@@ -13,6 +15,13 @@ export function LeftRail({
   onNavigate,
   publish,
   notify,
+  thisDevice,
+  devices,
+  writer,
+  onWriter,
+  wallet,
+  onConnectWallet,
+  onDisconnectWallet,
 }: {
   snapshot: Snapshot;
   identity: IdentityInfo;
@@ -20,6 +29,13 @@ export function LeftRail({
   onNavigate: (view: View) => void;
   publish: PublishFn;
   notify: (message: string) => void;
+  thisDevice: ThisDevice | null;
+  devices: DeviceView[];
+  writer: string;
+  onWriter: (device: string) => void;
+  wallet: WalletInfo | null;
+  onConnectWallet: (provider: Eip1193Provider) => void;
+  onDisconnectWallet: () => void;
 }) {
   const me = snapshot.me;
   const named = Boolean(snapshot.profiles[me?.pubkey ?? ""]);
@@ -227,6 +243,13 @@ export function LeftRail({
           </div>
         )}
 
+        <WalletPanel
+          wallet={wallet}
+          onConnect={onConnectWallet}
+          onDisconnect={onDisconnectWallet}
+          notify={notify}
+        />
+
         <div style={{ marginTop: 20, display: "flex", alignItems: "center", gap: 6 }}>
           <span
             style={{
@@ -241,6 +264,37 @@ export function LeftRail({
             {peers === 0 ? "no peers yet" : `${peers} peer${peers === 1 ? "" : "s"} · seq ${me?.seq ?? -1}`}
           </span>
         </div>
+
+        {(devices.length > 0 || thisDevice) && (
+          <div style={{ marginTop: 12 }}>
+            <div className="label" style={{ marginBottom: 6 }}>
+              Writing as
+            </div>
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+              <button
+                className={writer === "" ? "chip chip-water" : "btn btn-ghost"}
+                style={{ fontSize: 11 }}
+                onClick={() => onWriter("")}
+                title="The root key of this identity"
+              >
+                root key
+              </button>
+              {devices
+                .filter((device) => !device.revoked)
+                .map((device) => (
+                  <button
+                    key={device.device}
+                    className={writer === device.device ? "chip chip-water" : "btn btn-ghost"}
+                    style={{ fontSize: 11 }}
+                    onClick={() => onWriter(device.device)}
+                    title={device.device}
+                  >
+                    {device.name || shortAddr(device.device)}
+                  </button>
+                ))}
+            </div>
+          </div>
+        )}
 
         <div style={{ marginTop: 10 }}>
           <button className="btn btn-ghost" onClick={() => setBell((open) => !open)}>

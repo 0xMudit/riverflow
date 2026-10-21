@@ -1,9 +1,20 @@
-import { app, BrowserWindow, ipcMain, Menu, safeStorage, shell } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, protocol, safeStorage, shell } from "electron";
 import { rename } from "node:fs/promises";
 import { join } from "node:path";
-import type { EventBody, EventKind } from "../core/types";
+import type { Event, EventBody, EventKind } from "../core/types";
 import { importIdentity, type KeyBox } from "./identity";
 import { defaultTopic, RiverNode } from "./node";
+
+/**
+ * The window shows media through `river://blob/<hash>`. The bytes come out of
+ * the sealed store, decrypted, and never touch the disk in the clear.
+ */
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "river",
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+  },
+]);
 
 const ALLOWED_KINDS = new Set<EventKind>([
   "post",
@@ -116,6 +127,30 @@ async function boot() {
       flush = null;
       window?.webContents.send("river:update");
     }, 120);
+  });
+}
+
+/**
+ * Media is served from the sealed store over a private scheme. The renderer
+ * never sees a file path and never gets bytes it did not ask for.
+ */
+function registerProtocol() {
+  protocol.handle("river", async (request) => {
+    try {
+      const url = new URL(request.url);
+      if (url.hostname !== "blob") return new Response("not found", { status: 404 });
+      const hash = url.pathname.replace(/^\//, "");
+      const blob = node?.store.getBlob(hash);
+      if (!blob) return new Response("not found", { status: 404 });
+      return new Response(blob.bytes, {
+        headers: {
+          "content-type": blob.ref.type || "application/octet-stream",
+          "cache-control": "no-store",
+        },
+      });
+    } catch {
+      return new Response("not found", { status: 404 });
+    }
   });
 }
 
@@ -273,6 +308,80 @@ function registerIpc() {
     return current().authoriseDevice(String(device).toLowerCase(), String(name ?? ""));
   });
 
+  ipcMain.handle("river:this-device", async () => {
+    await ready;
+    const running = current();
+    const devices = running.devices();
+    const mine = devices.find((entry) => entry.device === running.device.publicKey);
+    return {
+      publicKey: running.device.publicKey,
+      name: mine?.name ?? "",
+      authorised: mine ? !mine.revoked : false,
+      revoked: Boolean(mine?.revoked),
+    };
+  });
+
+  ipcMain.handle("river:authorise-this-device", async (_event, name: string) => {
+    await ready;
+    return current().authoriseThisDevice(String(name ?? "this machine"));
+  });
+
+  ipcMain.handle("river:revoke-device", async (_event, device: string) => {
+    await ready;
+    if (!/^[0-9a-f]{64}$/i.test(String(device ?? ""))) {
+      throw new Error("expected a 64-character device key");
+    }
+    return current().revokeDevice(String(device).toLowerCase());
+  });
+
+  ipcMain.handle("river:attach-media", async (_event, bytes: Uint8Array, type: string, width?: number, height?: number) => {
+    await ready;
+    const data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    return current().attachMedia(data, String(type ?? ""), {
+      ...(typeof width === "number" ? { width } : {}),
+      ...(typeof height === "number" ? { height } : {}),
+    });
+  });
+
+  ipcMain.handle("river:proof", async (_event, author: string, device: string, seq: number) => {
+    await ready;
+    return current().store.proofFor(String(author ?? ""), String(device ?? ""), Number(seq));
+  });
+
+  ipcMain.handle("river:draft", async (_event, kind: EventKind, body: EventBody) => {
+    await ready;
+    if (!ALLOWED_KINDS.has(kind)) throw new Error(`unknown event kind: ${kind}`);
+    return current().draftEvent(kind, body ?? {});
+  });
+
+  ipcMain.handle("river:submit", async (_event, event: Event) => {
+    await ready;
+    return current().submitEvent(event);
+  });
+
+  ipcMain.handle("river:wallet", async () => {
+    await ready;
+    return current().walletInfo();
+  });
+
+  ipcMain.handle("river:use-wallet", async (_event, address: string | null) => {
+    await ready;
+    if (address && !/^0x[0-9a-f]{40}$/i.test(String(address))) {
+      throw new Error("expected an address like 0x1234…");
+    }
+    current().setWallet(address ? String(address).toLowerCase() : null);
+  });
+
+  ipcMain.handle("river:challenge", async () => {
+    await ready;
+    return current().createChallenge();
+  });
+
+  ipcMain.handle("river:sign-in", async (_event, message: string, signature: string) => {
+    await ready;
+    return current().verifySignIn(String(message ?? ""), String(signature ?? ""));
+  });
+
   ipcMain.handle("river:mute", async (_event, target: string) => {
     await ready;
     current().store.mute(String(target ?? ""));
@@ -327,6 +436,7 @@ if (!locked) {
   app.whenReady().then(async () => {
     Menu.setApplicationMenu(null);
     registerIpc();
+    registerProtocol();
     createWindow();
     ready = boot().catch((error) => {
       bootFailure = (error as Error).message;

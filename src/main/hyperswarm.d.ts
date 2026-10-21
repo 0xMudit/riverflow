@@ -23,10 +23,12 @@ declare module "hyperswarm" {
   }
 
   export interface SwarmSocket {
-    write(data: string): void;
+    /** returns false when the socket's buffer is full; wait for "drain" */
+    write(data: string): boolean;
     on(event: "data", handler: (chunk: Uint8Array) => void): void;
     on(event: "close", handler: () => void): void;
     on(event: "error", handler: (error: Error) => void): void;
+    on(event: "drain", handler: () => void): void;
     on(event: string, handler: (...args: never[]) => void): void;
     destroy(): void;
     remotePublicKey?: Uint8Array;
