@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ArrowLeft, UserCheck, UserPlus } from "lucide-react";
 import type { AuthorBundle } from "@/core/bridge";
 import type { Snapshot } from "@/core/types";
 import { Avatar } from "../components/Avatar";
@@ -6,6 +7,8 @@ import { Copyable } from "../components/Copy";
 import { PostCard } from "../components/PostCard";
 import { plural, profileOf, shortAddr } from "../format";
 import type { PublishFn } from "../useNode";
+import { Button } from "@/ui/button";
+import { Skeleton } from "@/ui/skeleton";
 
 export function ProfilePage({
   pubkey,
@@ -62,84 +65,102 @@ export function ProfilePage({
 
   return (
     <>
-      <header style={{ padding: "18px 0 18px", borderBottom: "1px solid var(--line)" }}>
-        <button className="btn btn-ghost" style={{ fontSize: 11.5, marginBottom: 14 }} onClick={onBack}>
-          ← back
-        </button>
+      <header className="border-b border-border/60 px-4 py-4">
+        <Button variant="ghost" size="sm" onClick={onBack} className="-ml-2 mb-3 gap-1.5">
+          <ArrowLeft className="size-4" />
+          Back
+        </Button>
 
-        <div style={{ display: "flex", gap: 14, alignItems: "flex-start" }}>
+        <div className="flex items-start gap-4">
           <Avatar
             name={named ? profile.name : `anon:${pubkey.slice(0, 6)}`}
             hue={profile.hue}
-            size={54}
+            size="xl"
             title={pubkey}
           />
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <h1 className="serif" style={{ fontSize: 22, lineHeight: 1.2, letterSpacing: "-0.01em" }}>
+          <div className="min-w-0 flex-1">
+            <h1 className="font-serif text-[22px] leading-tight tracking-tight">
               {named ? profile.name : "unnamed key"}
             </h1>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
-              <Copyable value={pubkey} label={shortAddr(pubkey)} className="chip" title="copy public key" />
-              {named && <span className="meta">named at seq {profile.seq}</span>}
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <Copyable
+                value={pubkey}
+                label={shortAddr(pubkey)}
+                className="mono text-xs text-muted-foreground"
+                title="copy public key"
+              />
+              {named && <span className="text-xs text-muted-foreground">named</span>}
             </div>
             {named && profile.bio ? (
-              <p
-                className="serif"
-                style={{ fontSize: 13.5, color: "var(--ink-dim)", marginTop: 9, lineHeight: 1.55 }}
-              >
+              <p className="mt-2 font-serif text-[14px] leading-relaxed text-muted-foreground">
                 {profile.bio}
               </p>
             ) : null}
           </div>
-        </div>
-
-        <div style={{ display: "flex", gap: 18, marginTop: 14, flexWrap: "wrap", alignItems: "center" }}>
-          <span className="meta">{plural(posts.length, "post")}</span>
-          {isMe && <span className="meta">{plural(snapshot.followers.length, "follower")}</span>}
-          <span className="meta">following {isMe ? snapshot.following.length : "—"}</span>
 
           {!isMe && (
-            <button
-              className={iFollow ? "btn" : "btn btn-primary"}
-              style={{ marginLeft: "auto" }}
+            <Button
+              variant={iFollow ? "outline" : "default"}
+              size="sm"
+              className="rounded-full"
               onClick={() => void toggleFollow()}
             >
-              {iFollow ? "unfollow" : "follow"}
-            </button>
+              {iFollow ? <UserCheck className="size-4" /> : <UserPlus className="size-4" />}
+              {iFollow ? "Following" : "Follow"}
+            </Button>
           )}
         </div>
 
+        <div className="mt-4 flex flex-wrap items-center gap-5 text-xs text-muted-foreground">
+          <span className="text-foreground">
+            <span className="font-semibold">{posts.length}</span> {plural(posts.length, "post")}
+          </span>
+          {isMe && (
+            <span>
+              <span className="font-semibold text-foreground">{snapshot.followers.length}</span>{" "}
+              {plural(snapshot.followers.length, "follower")}
+            </span>
+          )}
+          <span>
+            <span className="font-semibold text-foreground">
+              {isMe ? snapshot.following.length : "—"}
+            </span>{" "}
+            following
+          </span>
+        </div>
+
         {!named && bundle && (
-          <p className="meta" style={{ marginTop: 12, lineHeight: 1.6 }}>
+          <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
             This key has never named itself. Its events are on the chain regardless.
           </p>
         )}
       </header>
 
-      <div style={{ marginTop: 8 }}>
+      <div>
         {bundle === null && (
-          <div style={{ padding: "20px 0", display: "grid", gap: 8 }}>
-            <div className="skeleton" style={{ height: 12, width: "50%" }} />
-            <div className="skeleton" style={{ height: 12, width: "80%" }} />
+          <div className="space-y-3 px-4 py-6">
+            <Skeleton className="h-3 w-1/3" />
+            <Skeleton className="h-3 w-2/3" />
           </div>
         )}
 
         {bundle && posts.length === 0 && (
-          <p className="serif" style={{ fontSize: 14, color: "var(--ink-faint)", padding: "30px 0" }}>
+          <p className="px-4 py-12 text-center font-serif text-muted-foreground">
             {named ? "This identity has only ever listened." : "Nothing written under this key yet."}
           </p>
         )}
 
         {posts.map((post) => (
-          <PostCard
-            key={post.id}
-            post={post}
-            profiles={profiles}
-            me={me}
-            publish={publish}
-            notify={notify}
-            onOpenProfile={onOpenProfile}
-          />
+          <div key={post.id} className="border-b border-border/50">
+            <PostCard
+              post={post}
+              profiles={profiles}
+              me={me}
+              publish={publish}
+              notify={notify}
+              onOpenProfile={onOpenProfile}
+            />
+          </div>
         ))}
       </div>
     </>

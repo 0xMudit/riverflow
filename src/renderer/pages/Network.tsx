@@ -1,8 +1,12 @@
 import { useEffect, useState } from "react";
-import type { BreachReport, CheckpointView, IdentityInfo, Moderation, NetworkStatus, ThisDevice } from "@/core/bridge";
-import type { DeviceView, Event, Snapshot, VerifyReport } from "@/core/types";
+import { Link2, ShieldCheck, Trash2, PencilRuler } from "lucide-react";
+import type { BreachReport, CheckpointView, IdentityInfo, NetworkStatus } from "@/core/bridge";
+import type { Event, Snapshot, VerifyReport } from "@/core/types";
 import { Copyable } from "../components/Copy";
-import { plural, shortAddr, shortHash, timeAgo } from "../format";
+import { plural, shortHash, timeAgo } from "../format";
+import { Button } from "@/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/ui/card";
+import { Input } from "@/ui/input";
 
 type Mode = "verify" | "erase" | "rewrite";
 
@@ -11,32 +15,29 @@ export function NetworkPage({
   identity,
   notify,
   onOpenProfile,
-  thisDevice,
-  devices,
 }: {
   snapshot: Snapshot;
   identity: IdentityInfo;
   notify: (message: string) => void;
   onOpenProfile: (pubkey: string) => void;
-  thisDevice: ThisDevice | null;
-  devices: DeviceView[];
 }) {
   const [report, setReport] = useState<(VerifyReport & { removedSeq?: number | null }) | null>(null);
   const [mode, setMode] = useState<Mode | null>(null);
   const [busy, setBusy] = useState(false);
   const [events, setEvents] = useState<Event[]>([]);
   const [address, setAddress] = useState("");
-  const [deviceKey, setDeviceKey] = useState("");
-  const [deviceName, setDeviceName] = useState("");
   const [network, setNetwork] = useState<NetworkStatus | null>(null);
   const [checkpoints, setCheckpoints] = useState<CheckpointView[]>([]);
-  const [moderation, setModeration] = useState<Moderation>({ muted: [], blocked: [], filters: [] });
 
   const mySeq = snapshot.me?.seq ?? -1;
 
   useEffect(() => {
     let alive = true;
     const load = () => {
+      void window.river
+        .author(identity.publicKey)
+        .then((bundle) => alive && setEvents(bundle.events))
+        .catch(() => undefined);
       void window.river
         .network()
         .then((status) => alive && setNetwork(status))
@@ -54,17 +55,6 @@ export function NetworkPage({
     };
   }, [identity.publicKey, mySeq]);
 
-  useEffect(() => {
-    let alive = true;
-    void window.river
-      .author(identity.publicKey)
-      .then((bundle) => alive && setEvents(bundle.events))
-      .catch(() => undefined);
-    return () => {
-      alive = false;
-    };
-  }, [identity.publicKey, mySeq]);
-
   const run = async (next: Mode) => {
     setBusy(true);
     setMode(next);
@@ -72,11 +62,17 @@ export function NetworkPage({
       if (next === "verify") {
         const result = await window.river.verify();
         setReport(result);
-        notify(result.ok ? `Verified ${plural(result.events, "event")} — every link and signature holds` : "Verification failed");
+        notify(
+          result.ok
+            ? `Verified ${plural(result.events, "event")} — every link and signature holds`
+            : "Verification failed",
+        );
       } else {
         const result: BreachReport = await window.river.breach(next);
         setReport(result);
-        notify(`Simulated ${next === "erase" ? "erasure" : "rewrite"} — the chain noticed`);
+        notify(
+          `Simulated ${next === "erase" ? "erasure" : "rewrite"} — the chain noticed`,
+        );
       }
     } catch (cause) {
       notify(cause instanceof Error ? cause.message : "could not run that check");
@@ -101,338 +97,253 @@ export function NetworkPage({
 
   return (
     <>
-      <header style={{ padding: "20px 0 0" }}>
-        <h1 className="serif" style={{ fontSize: 23, lineHeight: 1.1, letterSpacing: "-0.01em" }}>
-          The network
-        </h1>
-        <p className="meta" style={{ marginTop: 6 }}>
-          {plural(snapshot.peers.length, "peer")} · {plural(snapshot.stats.authors, "chain")} ·{" "}
-          {plural(snapshot.stats.events, "event")} · this node is {identity.protected ? "key-sealed" : "running with a plaintext key"}
+      <header className="sticky top-0 z-10 border-b border-border/60 bg-background/90 px-4 py-3.5 backdrop-blur">
+        <h1 className="font-serif text-[22px] leading-none tracking-tight">The network</h1>
+        <p className="mt-1.5 text-xs text-muted-foreground">
+          {plural(snapshot.peers.length, "peer")} · {plural(snapshot.stats.authors, "person", "people")} ·{" "}
+          {plural(snapshot.stats.events, "event")}
         </p>
       </header>
 
-      <section
-        className="panel"
-        style={{
-          marginTop: 18,
-          padding: "14px 16px",
-          borderColor: breached ? "rgba(229,118,106,0.42)" : undefined,
-          background: breached ? "rgba(229,118,106,0.05)" : undefined,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" }}>
-          <span
-            style={{
-              width: 7,
-              height: 7,
-              borderRadius: 99,
-              background: report && !report.ok ? "var(--danger)" : "var(--water)",
-              boxShadow: report && !report.ok ? "0 0 9px rgba(229,118,106,0.8)" : "0 0 9px rgba(91,217,194,0.8)",
-            }}
-          />
-          <strong style={{ fontSize: 13.5, fontWeight: 600 }}>
-            {!report
-              ? "Integrity"
-              : report.ok
-                ? "Every chain verifies"
-                : breached
-                  ? "The chain broke immediately"
-                  : "Verification failed"}
-          </strong>
-          <span className="meta" style={{ marginLeft: "auto" }}>
-            {report ? `${report.events} events · ${report.durationMs}ms` : "not checked yet"}
-          </span>
-        </div>
-
-        <p className="serif" style={{ fontSize: 13, lineHeight: 1.6, color: "var(--ink-dim)", marginTop: 8 }}>
-          {breached
-            ? `You ${mode === "erase" ? "removed one event" : "rewrote one event"}'s text in a copy held in memory. ${
-                mode === "erase"
-                  ? "Every later event still points at the missing one, so the chain reports a gap at that exact position."
-                  : "The edit kept its old id, so the signature no longer covers the content."
-              } The database on disk was never touched.`
-            : "Each node re-hashes its own chains from seq 0 and checks every signature. Nothing is taken on faith, and no one has to be trusted with the check."}
-        </p>
-
-        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-          <button className="btn" disabled={busy} onClick={() => void run("verify")}>
-            {busy && mode === "verify" ? "checking…" : "Verify everything"}
-          </button>
-          <button className="btn btn-danger" disabled={busy} onClick={() => void run("erase")}>
-            Try to erase an event
-          </button>
-          <button className="btn btn-danger" disabled={busy} onClick={() => void run("rewrite")}>
-            Try to rewrite a post
-          </button>
-        </div>
-
-        {report && report.errors.length > 0 && (
-          <ul style={{ margin: "12px 0 0", paddingLeft: 16, fontSize: 11.5, color: "var(--danger)" }}>
-            {report.errors.slice(0, 4).map((error, index) => (
-              <li key={index} style={{ marginTop: 4 }}>
-                <span className="mono">
-                  seq {error.seq} · {error.code}
-                </span>{" "}
-                — {error.detail}
-              </li>
-            ))}
-          </ul>
-        )}
-
-        {report?.ok && (
-          <p className="meta" style={{ marginTop: 10 }}>
-            {report.authors} chain{report.authors === 1 ? "" : "s"} checked, {report.events} signatures valid.
-          </p>
-        )}
-      </section>
-
-      <section style={{ marginTop: 26 }}>
-        <div className="label" style={{ marginBottom: 10 }}>
-          Peers
-        </div>
-
-        <div className="panel" style={{ padding: "12px 14px" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-            <span className="meta">your address</span>
+      <div className="space-y-4 px-4 py-4">
+        <Card className="border-border/70 bg-card/40">
+          <CardHeader className="px-4 py-3">
+            <CardTitle className="text-sm">People</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-4">
+            <div className="label mb-1.5 text-[9px]">your address</div>
             {snapshot.listen ? (
-              <Copyable value={snapshot.listen} label={snapshot.listen} className="chip chip-water" />
-            ) : (
-              <span className="meta">none</span>
-            )}
-            <span className="meta" style={{ marginLeft: "auto", fontSize: 10 }}>
-              {snapshot.peers.length === 0 ? "waiting for someone to dial in" : "gossiping"}
-            </span>
-          </div>
-
-          <div style={{ display: "flex", gap: 6, marginTop: 12 }}>
-            <input
-              className="input mono"
-              placeholder="192.168.1.20:7331"
-              value={address}
-              onChange={(event) => setAddress(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void addPeer();
-              }}
-              style={{ fontSize: 12 }}
-            />
-            <button className="btn btn-primary" onClick={() => void addPeer()}>
-              Connect
-            </button>
-          </div>
-
-          <p className="meta" style={{ marginTop: 8, lineHeight: 1.6 }}>
-            Nodes on the same network find each other automatically. To cross networks, share your
-            address or dial theirs.
-          </p>
-
-          <div style={{ marginTop: 12 }}>
-            {snapshot.peers.length === 0 && (
-              <p className="meta" style={{ padding: "8px 0" }}>
-                No one else is here yet.
-              </p>
-            )}
-            {snapshot.peers.map((peer) => (
-              <div
-                key={peer.id}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr auto auto",
-                  gap: 10,
-                  alignItems: "baseline",
-                  padding: "7px 0",
-                  borderTop: "1px dotted var(--line)",
-                }}
-              >
-                <span className="mono" style={{ fontSize: 11, color: "var(--ink)" }}>
-                  {peer.id}
-                </span>
-                <span className="meta" style={{ fontSize: 10 }}>
-                  {peer.address} · {peer.direction} · {peer.heads} chains
-                </span>
-                <span className="meta" style={{ fontSize: 10 }}>
-                  {timeAgo(peer.since)}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      </section>
-
-      <section style={{ marginTop: 26 }}>
-        <div className="label" style={{ marginBottom: 10 }}>
-          Reach
-        </div>
-
-        <div className="panel" style={{ padding: "12px 14px" }}>
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "auto 1fr",
-              gap: "7px 16px",
-              fontSize: 12,
-              alignItems: "baseline",
-            }}
-          >
-            <span className="meta">distributed table</span>
-            <span>
-              {network?.dht.active
-                ? "on the network"
-                : network?.dht.enabled
-                  ? "starting…"
-                  : "off"}
-            </span>
-
-            <span className="meta">peers it knows</span>
-            <span>{network?.dht.peers ?? 0}</span>
-
-            <span className="meta">bootstrap</span>
-            <span className="mono" style={{ fontSize: 11 }}>
-              {network?.dht.bootstrap.length ? network.dht.bootstrap.join(", ") : "public nodes"}
-            </span>
-
-            <span className="meta">relay</span>
-            <span>{network?.relay ? "holding other people's logs" : "not holding"}</span>
-
-            <span className="meta">subscribed to</span>
-            <span>{network?.subscriptions.length ?? 0} authors</span>
-
-            <span className="meta">not held yet</span>
-            <span>{network?.wanted ?? 0} chains</span>
-          </div>
-
-          {network?.dht.error && (
-            <p className="meta" style={{ marginTop: 10, color: "var(--danger)" }}>
-              {network.dht.error}
-            </p>
-          )}
-
-          <p className="meta" style={{ marginTop: 12, lineHeight: 1.6 }}>
-            Peers find each other through a distributed table and punch a hole through both
-            firewalls. The traffic is encrypted end to end, so the table never sees a post — and
-            you can point this node at a bootstrap node you run yourself.
-          </p>
-        </div>
-      </section>
-
-      <section style={{ marginTop: 26 }}>
-        <div className="label" style={{ marginBottom: 10 }}>
-          Checkpoints
-        </div>
-
-        <div className="panel" style={{ padding: "4px 14px" }}>
-          {checkpoints.length === 0 && (
-            <p className="meta" style={{ padding: "12px 0" }}>
-              No checkpoint yet — one is signed every minute.
-            </p>
-          )}
-          {checkpoints.map((checkpoint) => (
-            <div
-              key={checkpoint.root}
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr auto auto",
-                gap: 10,
-                alignItems: "baseline",
-                padding: "7px 0",
-                borderBottom: "1px dotted var(--line)",
-              }}
-            >
-              <span className="mono" style={{ fontSize: 11 }}>
-                {checkpoint.root.slice(0, 18)}…
-              </span>
-              <span className="meta" style={{ fontSize: 10 }}>
-                seq {checkpoint.seq} · {checkpoint.count} events
-              </span>
-              <span className="meta" style={{ fontSize: 10 }}>
-                {timeAgo(checkpoint.at)}
-              </span>
-            </div>
-          ))}
-
-          <p className="meta" style={{ marginTop: 12, marginBottom: 12, lineHeight: 1.6 }}>
-            A Merkle root over your chain, signed by you. A node that missed part of your history
-            can be handed the root and a short path and check the rest without replaying
-            everything.
-          </p>
-        </div>
-      </section>
-
-
-      <section style={{ marginTop: 26 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-          <span className="label">Your chain</span>
-          <span className="meta" style={{ fontSize: 10 }}>
-            {events.length} events · newest first
-          </span>
-        </div>
-
-        <div className="panel" style={{ padding: "4px 14px", overflow: "hidden" }}>
-          {events.length === 0 && (
-            <p className="meta" style={{ padding: "12px 0" }}>
-              Nothing written yet.
-            </p>
-          )}
-          {events.map((event) => (
-            <div
-              key={event.id}
-              style={{
-                display: "grid",
-                gridTemplateColumns: "44px 64px 1fr auto auto",
-                gap: 10,
-                alignItems: "baseline",
-                padding: "7px 0",
-                borderBottom: "1px dotted var(--line)",
-              }}
-            >
-              <span className="mono" style={{ fontSize: 10.5, color: "var(--ink-faint)" }}>
-                #{event.seq}
-              </span>
-              <span className="label" style={{ fontSize: 9 }}>
-                {event.kind}
-              </span>
-              <span className="mono" style={{ fontSize: 10.5, color: "var(--ink-dim)", overflow: "hidden" }}>
-                {event.body.text
-                  ? `“${event.body.text.slice(0, 54)}${event.body.text.length > 54 ? "…" : ""}”`
-                  : event.body.name
-                    ? `name → ${event.body.name}`
-                    : event.body.target
-                      ? `→ ${shortHash(event.body.target, 6, 4)}`
-                      : ""}
-              </span>
               <Copyable
-                value={event.id}
-                label={shortHash(event.id, 6, 4)}
-                className="mono"
-                title={`prev ${event.prev || "genesis"}`}
+                value={snapshot.listen}
+                label={snapshot.listen}
+                className="mono text-xs text-muted-foreground"
+                title="Share this, or dial theirs"
               />
-              <span className="mono" style={{ fontSize: 10, color: "var(--water)" }} title="signature verified">
-                ✓
-              </span>
+            ) : (
+              <span className="text-xs text-muted-foreground">not listening</span>
+            )}
+
+            <div className="mt-3 flex gap-2">
+              <Input
+                value={address}
+                onChange={(event) => setAddress(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void addPeer();
+                }}
+                placeholder="192.168.1.20:7331"
+                className="mono h-9 text-xs"
+              />
+              <Button size="sm" onClick={() => void addPeer()}>
+                Connect
+              </Button>
             </div>
-          ))}
-        </div>
 
-        <p className="meta" style={{ marginTop: 16, lineHeight: 1.7 }}>
-          Each event stores the id of the one before it. To change a sentence you would have to re-sign
-          every event after it — with a key you do not have.
-        </p>
+            <div className="mt-3">
+              {snapshot.peers.length === 0 && (
+                <p className="text-xs text-muted-foreground">
+                  Nobody else is here yet. People on the same network find you by themselves; across
+                  networks the table below does it.
+                </p>
+              )}
+              {snapshot.peers.map((peer) => (
+                <div
+                  key={peer.id}
+                  className="flex items-baseline gap-2 border-t border-border/50 py-2 text-xs first:border-t-0"
+                >
+                  <button
+                    className="mono truncate text-foreground hover:underline"
+                    onClick={() => onOpenProfile(peer.id)}
+                  >
+                    {peer.id.slice(0, 12)}…
+                  </button>
+                  <span className="text-muted-foreground">
+                    {peer.address} · {peer.direction}
+                  </span>
+                  <span className="ml-auto shrink-0 text-muted-foreground">{timeAgo(peer.since)}</span>
+                </div>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
 
-        <p className="meta" style={{ marginTop: 10 }}>
-          A post, an edit and a retraction are all just events here. Nothing is ever removed from this
-          list.
-        </p>
+        <Card className="border-border/70 bg-card/40">
+          <CardHeader className="px-4 py-3">
+            <CardTitle className="text-sm">Reach</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-4">
+            <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+              <dt className="text-muted-foreground">distributed table</dt>
+              <dd>
+                {network?.dht.active
+                  ? "on the network"
+                  : network?.dht.enabled
+                    ? "starting…"
+                    : "off"}
+              </dd>
 
-        <p className="meta" style={{ marginTop: 10 }}>
-          Your key: {shortAddr(identity.publicKey)} ·{" "}
-          <button
-            className="link-quiet"
-            style={{ textDecoration: "underline", fontSize: 11 }}
-            onClick={() => onOpenProfile(identity.publicKey)}
-          >
-            open your profile
-          </button>
-        </p>
-      </section>
+              <dt className="text-muted-foreground">peers it knows</dt>
+              <dd>{network?.dht.peers ?? 0}</dd>
+
+              <dt className="text-muted-foreground">bootstrap</dt>
+              <dd className="mono truncate text-xs">
+                {network?.dht.bootstrap.length ? network.dht.bootstrap.join(", ") : "public nodes"}
+              </dd>
+
+              <dt className="text-muted-foreground">relay</dt>
+              <dd>{network?.relay ? "holding other people's logs" : "not holding"}</dd>
+
+              <dt className="text-muted-foreground">subscribed to</dt>
+              <dd>{network?.subscriptions.length ?? 0} people</dd>
+            </dl>
+
+            {network?.dht.error && <p className="mt-3 text-xs text-destructive">{network.dht.error}</p>}
+
+            <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+              Peers find each other through a distributed table and punch a hole through both
+              firewalls. The traffic is encrypted end to end, so the table never sees a post — and
+              you can point this node at a table you run yourself.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card
+          className={`border-border/70 bg-card/40 ${breached ? "border-destructive/40" : ""}`}
+        >
+          <CardHeader className="px-4 py-3">
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <ShieldCheck className="size-4 text-primary" />
+              Integrity
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-4">
+            <p className="text-sm font-medium">
+              {!report
+                ? "Not checked yet"
+                : report.ok
+                  ? "Every chain verifies"
+                  : breached
+                    ? "The chain broke immediately"
+                    : "Verification failed"}
+            </p>
+            <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+              {breached
+                ? `You ${mode === "erase" ? "removed one event" : "rewrote one event"}'s text in a copy held in memory. ${
+                    mode === "erase"
+                      ? "Every later event still points at the missing one, so the chain reports a gap at that exact position."
+                      : "The edit kept its old id, so the signature no longer covers the content."
+                  } The database on disk was never touched.`
+                : "Each node re-hashes its own chains from the first event and checks every signature. Nothing is taken on faith, and no one has to be trusted with the check."}
+            </p>
+
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button size="sm" disabled={busy} onClick={() => void run("verify")}>
+                {busy && mode === "verify" ? "checking…" : "Verify everything"}
+              </Button>
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => void run("erase")}>
+                <Trash2 className="size-4" />
+                Try to erase an event
+              </Button>
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => void run("rewrite")}>
+                <PencilRuler className="size-4" />
+                Try to rewrite a post
+              </Button>
+            </div>
+
+            {report && report.errors.length > 0 && (
+              <ul className="mt-3 space-y-1 text-xs text-destructive">
+                {report.errors.slice(0, 4).map((error, index) => (
+                  <li key={index}>
+                    <span className="mono">
+                      seq {error.seq} · {error.code}
+                    </span>{" "}
+                    — {error.detail}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card className="border-border/70 bg-card/40">
+          <CardHeader className="px-4 py-3">
+            <CardTitle className="text-sm">Checkpoints</CardTitle>
+          </CardHeader>
+          <CardContent className="px-4 pb-4">
+            {checkpoints.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                No checkpoint yet — one is signed every minute.
+              </p>
+            ) : (
+              checkpoints.map((checkpoint) => (
+                <div
+                  key={checkpoint.root}
+                  className="flex items-baseline gap-2 border-t border-border/50 py-2 text-xs first:border-t-0"
+                >
+                  <span className="mono truncate text-muted-foreground">
+                    {checkpoint.root.slice(0, 16)}…
+                  </span>
+                  <span className="ml-auto shrink-0 text-muted-foreground">
+                    {checkpoint.count} events · {timeAgo(checkpoint.at)}
+                  </span>
+                </div>
+              ))
+            )}
+            <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+              A Merkle root over your chain, signed by you. A node that missed part of your history
+              can be handed the root and a short path and check the rest without replaying
+              everything.
+            </p>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border/70 bg-card/40">
+          <CardHeader className="flex-row items-center justify-between px-4 py-3">
+            <CardTitle className="text-sm">Your chain</CardTitle>
+            <span className="text-[11px] text-muted-foreground">{events.length} events</span>
+          </CardHeader>
+          <CardContent className="px-4 pb-4">
+            {events.length === 0 ? (
+              <p className="text-xs text-muted-foreground">Nothing written yet.</p>
+            ) : (
+              events.map((event) => (
+                <div
+                  key={event.id}
+                  className="flex items-baseline gap-2 border-t border-border/50 py-1.5 text-xs first:border-t-0"
+                >
+                  <span className="mono w-6 shrink-0 text-muted-foreground">#{event.seq}</span>
+                  <span className="label w-16 shrink-0 text-[9px]">{event.kind}</span>
+                  <span className="mono min-w-0 flex-1 truncate text-muted-foreground">
+                    {event.body.text
+                      ? `“${event.body.text.slice(0, 54)}${event.body.text.length > 54 ? "…" : ""}”`
+                      : event.body.name
+                        ? `name → ${event.body.name}`
+                        : event.body.target
+                          ? `→ ${shortHash(event.body.target, 6, 4)}`
+                          : ""}
+                  </span>
+                  <Copyable
+                    value={event.id}
+                    label={shortHash(event.id, 6, 4)}
+                    className="mono text-[10px]"
+                    title={`prev ${event.prev || "genesis"}`}
+                  />
+                  <span className="mono shrink-0 text-[10px] text-primary" title="signature verified">
+                    ✓
+                  </span>
+                </div>
+              ))
+            )}
+            <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+              Each event stores the id of the one before it. To change a sentence you would have to
+              re-sign every event after it — with a key you do not have.
+            </p>
+            <p className="mt-2 flex items-center gap-1.5 text-xs text-muted-foreground">
+              <Link2 className="size-3.5" />
+              Your key: {identity.publicKey.slice(0, 12)}…
+            </p>
+          </CardContent>
+        </Card>
+      </div>
     </>
   );
 }

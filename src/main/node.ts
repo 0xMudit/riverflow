@@ -607,6 +607,22 @@ export class RiverNode extends EventEmitter {
   }
 
   /**
+   * Do we want the whole of this person's log, or only a sample of it?
+   *
+   * The people you follow, and the people who follow you, you want all of.
+   * A stranger you have never heard of, you want enough to know who they are:
+   * nobody pulls the whole internet to find out who exists.
+   */
+  private interestedIn(author: string): boolean {
+    if (author === this.identity.publicKey) return true;
+    // A relay mirrors other people's logs so they survive an offline author.
+    if (this.relay) return true;
+    if (this.store.following(this.identity.publicKey).includes(author)) return true;
+    if (this.store.followers(this.identity.publicKey).includes(author)) return true;
+    return this.store.subscriptions().includes(author);
+  }
+
+  /**
    * A peer told us where a chain has reached. Ask for what we are missing —
    * but only a sample of a chain we have never seen, so a node does not pull
    * the whole history of every stranger on the network.
@@ -628,10 +644,24 @@ export class RiverNode extends EventEmitter {
       if (mirrored >= RELAY_QUOTA) return;
     }
 
-    this.store.wantChain(author, device, seq);
+    const interested = this.interestedIn(author);
+    if (interested) {
+      // A want means "we want this chain up to here". It is what tells us to
+      // ask for the rest of it once the first part has landed.
+      this.store.wantChain(author, device, seq);
+    } else {
+      this.store.clearWant(author, device);
+    }
 
     for (const link of this.links.values()) {
-      this.requestChain(link.conn, author, device, head ? head.seq + 1 : 0, seq);
+      this.requestChain(
+        link.conn,
+        author,
+        device,
+        head ? head.seq + 1 : 0,
+        seq,
+        !interested,
+      );
     }
   }
 
@@ -641,17 +671,17 @@ export class RiverNode extends EventEmitter {
     device: string,
     from?: number,
     to?: number,
+    sample = false,
   ): void {
     const head = this.store.head(author, device);
     const start = from ?? (head ? head.seq + 1 : 0);
     const end = to ?? (this.store.wantFor(author, device)?.seq ?? start);
     if (end < start) return;
 
-    // A relay mirrors whole logs, so an author can go offline without their
-    // history going with them. A reader takes a sample of a stranger's log,
-    // so nobody pulls the whole internet to find out who exists.
-    const sampleEnd = this.relay || head ? end : Math.max(start, end - SAMPLE);
-    connection.send({ t: "want", ranges: [[author, device, start, Math.max(start, sampleEnd)]] });
+    // A reader takes a sample of a stranger's log: the first few events, which
+    // is enough to know who they are, and not the whole history of everybody.
+    const last = sample ? Math.min(end, start + SAMPLE - 1) : end;
+    connection.send({ t: "want", ranges: [[author, device, start, last]] });
   }
 
   /**

@@ -1,16 +1,16 @@
-"use client";
-
 import { useState } from "react";
-import { shortHash } from "@/renderer/format";
+import { Check, Copy } from "lucide-react";
+import { cn } from "@/lib/utils";
 
+/** A value you can take with you. Click to copy. */
 export function Copyable({
   value,
   label,
-  className = "chip",
+  className,
   title,
 }: {
   value: string;
-  label: string;
+  label?: string;
   className?: string;
   title?: string;
 }) {
@@ -20,25 +20,27 @@ export function Copyable({
     try {
       await navigator.clipboard.writeText(value);
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
+      setTimeout(() => setCopied(false), 1400);
     } catch {
-      /* Clipboard can be blocked; the value is still visible on screen. */
+      /* the clipboard is not always there */
     }
   };
 
   return (
     <button
-      type="button"
-      onClick={copy}
-      className={className}
-      title={title ?? value}
-      style={{ cursor: "pointer" }}
+      className={cn(
+        "group inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 -mx-1.5 transition-colors hover:bg-accent",
+        className,
+      )}
+      onClick={() => void copy()}
+      title={title ?? "Copy"}
     >
-      {copied ? "copied" : label}
+      <span className="truncate">{label ?? value}</span>
+      {copied ? (
+        <Check className="size-3.5 shrink-0 text-primary" />
+      ) : (
+        <Copy className="size-3.5 shrink-0 opacity-0 transition-opacity group-hover:opacity-60" />
+      )}
     </button>
   );
-}
-
-export function HashChip({ hash, label }: { hash: string; label?: string }) {
-  return <Copyable value={hash} label={label ?? shortHash(hash)} className="chip" />;
 }

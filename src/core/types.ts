@@ -18,7 +18,8 @@ export type EventKind =
   | "reaction"
   | "follow"
   | "profile"
-  | "device";
+  | "device"
+  | "dm";
 
 export interface EventBody {
   /** post, edit */
@@ -43,6 +44,12 @@ export interface EventBody {
   revoked?: boolean;
   /** post: media attached, by content hash */
   media?: BlobRef[];
+  /** dm: the public key the words are sealed for */
+  to?: string;
+  /** dm: the envelope addressed to the recipient (never plaintext) */
+  sealed?: string;
+  /** dm: a second envelope addressed to the author, so sent mail stays readable */
+  copy?: string;
 }
 
 /** A media blob, addressed by the hash of its bytes. */
@@ -228,6 +235,46 @@ export interface FeedPage {
 export interface ThreadView {
   root: PostView | null;
   posts: PostView[];
+}
+
+/**
+ * A timeline is the river read straight through: every post and reply, oldest
+ * to newest, in one continuous line. The feed is what a reader *should* see;
+ * the timeline is what actually happened, and when.
+ */
+export interface TimelinePage {
+  posts: PostView[];
+  /** pass back as `before` to continue; null when the timeline is exhausted */
+  next: { createdAt: number; id: string } | null;
+}
+
+/** One direct message, seen from this machine's side of the conversation. */
+export interface DmMessageView {
+  id: string;
+  /** who wrote it */
+  author: string;
+  /** who it is for */
+  recipient: string;
+  /** the other person, from the viewer's point of view */
+  peer: string;
+  /** null when this machine cannot open the envelope (wrong key, tampering) */
+  text: string | null;
+  createdAt: number;
+  seq: number;
+  /** the viewer wrote it */
+  mine: boolean;
+  /** the viewer has read it */
+  read: boolean;
+}
+
+/** A chat in the sidebar: the last thing said, and how much is unread. */
+export interface DmConversation {
+  peer: string;
+  lastAt: number;
+  lastText: string | null;
+  lastMine: boolean;
+  unread: number;
+  total: number;
 }
 
 export interface Snapshot {

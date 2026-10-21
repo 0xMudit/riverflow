@@ -12,7 +12,16 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "types": ["vite/client"],
-    "paths": { "@/*": ["./src/*"] }
+    "paths": {
+      "@/ui/*": ["./src/renderer/components/ui/*"],
+      "@/*": ["./src/*"]
+    }
   },
-  "include": ["src/renderer/**/*.ts", "src/renderer/**/*.tsx", "src/core/**/*.ts", "src/preload/**/*.ts"]
+  "include": [
+    "src/renderer/**/*.ts",
+    "src/renderer/**/*.tsx",
+    "src/core/**/*.ts",
+    "src/lib/**/*.ts",
+    "src/preload/**/*.ts"
+  ]
 }

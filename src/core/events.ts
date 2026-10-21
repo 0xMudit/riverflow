@@ -154,6 +154,18 @@ export function validateShape(event: Event, now = Date.now()): string | null {
       }
       return null;
     }
+    case "dm": {
+      // The words are not here to check: only the envelope is. It must be
+      // addressed to a real key, sealed for somebody else, and small enough
+      // that a peer cannot use one message to fill our disk.
+      if (!HEX_KEY.test(body.to ?? "")) return "dm needs a recipient key";
+      if (body.to === event.author) return "cannot message yourself";
+      if (!isEnvelope(body.sealed)) return "dm needs a sealed envelope";
+      if (body.sealed.length > MAX_ENVELOPE) return "dm envelope is too large";
+      if (body.copy !== undefined && !isEnvelope(body.copy)) return "dm copy is not an envelope";
+      if (event.device) return "a device cannot send a direct message";
+      return null;
+    }
     default:
       return "unknown event kind";
   }

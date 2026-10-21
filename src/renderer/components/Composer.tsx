@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { Image as ImageIcon } from "lucide-react";
 import { LIMITS } from "@/core/events";
 import type { BlobRef } from "@/core/types";
 import type { PublishFn } from "../useNode";
 import { Avatar } from "./Avatar";
+import { Button } from "@/ui/button";
+import { Textarea } from "@/ui/textarea";
 
 /**
  * The composer. It builds one signed event and appends to your chain.
@@ -41,13 +44,6 @@ export function Composer({
   useEffect(() => {
     if (autoFocus) area.current?.focus();
   }, [autoFocus, replyTo?.id]);
-
-  useEffect(() => {
-    const element = area.current;
-    if (!element) return;
-    element.style.height = "auto";
-    element.style.height = `${Math.min(element.scrollHeight, 320)}px`;
-  }, [text]);
 
   useEffect(
     () => () => {
@@ -107,45 +103,38 @@ export function Composer({
       setPreviews([]);
       onCancelReply?.();
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "could not seal that post");
+      setError(cause instanceof Error ? cause.message : "could not send that");
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="pane" style={{ padding: compact ? "12px 14px" : "16px 18px 12px" }}>
+    <div className="rounded-2xl border border-border/70 bg-card/60">
       {replyTo && (
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, fontSize: 11.5 }}>
-          <span className="chip chip-water">replying to {replyTo.name}</span>
-          <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={onCancelReply}>
+        <div className="flex items-center gap-2 border-b border-border/60 px-4 py-2 text-xs text-muted-foreground">
+          Replying to {replyTo.name}
+          <button className="ml-auto hover:text-foreground" onClick={onCancelReply}>
             cancel
           </button>
         </div>
       )}
 
-      <div style={{ display: "flex", gap: 11 }}>
-        <Avatar name={me?.name ?? "you"} hue={me?.hue ?? 200} size={compact ? 26 : 32} />
-        <div style={{ flex: 1, minWidth: 0 }}>
+      <div className="flex gap-3 p-3.5">
+        <Avatar name={me?.name ?? "you"} hue={me?.hue ?? 200} size={compact ? "sm" : "md"} />
+
+        <div className="min-w-0 flex-1">
           {previews.length > 0 && (
-            <div style={{ display: "flex", gap: 8, marginBottom: 9, flexWrap: "wrap" }}>
+            <div className="mb-2.5 flex flex-wrap gap-2">
               {previews.map((preview, index) => (
-                <div key={preview} style={{ position: "relative" }}>
+                <div key={preview} className="relative">
                   <img
                     src={preview}
                     alt=""
-                    style={{
-                      width: 88,
-                      height: 88,
-                      objectFit: "cover",
-                      borderRadius: 8,
-                      border: "1px solid var(--line)",
-                      display: "block",
-                    }}
+                    className="size-24 rounded-xl border border-border object-cover"
                   />
                   <button
-                    className="btn btn-ghost"
-                    style={{ position: "absolute", top: 3, right: 3, padding: "0 5px", fontSize: 10 }}
+                    className="absolute right-1 top-1 rounded-full bg-background/80 px-1.5 text-[10px] text-muted-foreground hover:text-foreground"
                     onClick={() => drop(index)}
                     aria-label="Remove this image"
                   >
@@ -156,74 +145,57 @@ export function Composer({
             </div>
           )}
 
-          <textarea
+          <Textarea
             ref={area}
-            className="textarea"
-            rows={compact ? 1 : 2}
-            maxLength={LIMITS.text}
-            placeholder={replyTo ? "Add to this thread…" : "Drop something into the river…"}
             value={text}
             onChange={(event) => setText(event.target.value)}
             onKeyDown={(event) => {
               if ((event.metaKey || event.ctrlKey) && event.key === "Enter") void send();
             }}
+            maxLength={LIMITS.text}
+            placeholder={replyTo ? "Add to this thread…" : "What's happening?"}
             aria-label="Write a post"
+            className="min-h-[64px] resize-none border-0 bg-transparent px-0 text-[17px] leading-relaxed shadow-none outline-none focus-visible:ring-0"
           />
-
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              marginTop: 8,
-              gap: 10,
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-              <span className="meta" style={{ color: remaining < 150 ? "var(--silt)" : undefined }}>
-                {remaining}
-              </span>
-              <span className="meta" style={{ opacity: 0.55 }}>
-                ctrl ↵
-              </span>
-              <input
-                ref={picker}
-                type="file"
-                accept="image/*"
-                multiple
-                hidden
-                onChange={(event) => void attach(event.target.files)}
-              />
-              <button
-                className="btn btn-ghost"
-                style={{ fontSize: 11.5 }}
-                disabled={busy}
-                onClick={() => picker.current?.click()}
-                title="Attach an image; it is stored by the hash of its bytes"
-              >
-                + image
-              </button>
-            </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              {chainSeq !== undefined && (
-                <span className="meta" style={{ opacity: 0.55, fontSize: 10 }}>
-                  event {chainSeq}
-                </span>
-              )}
-              <button
-                className="btn btn-primary"
-                disabled={!text.trim() || busy}
-                onClick={() => void send()}
-                title="Signed by your key and appended to your chain, for good"
-              >
-                {busy ? "sending…" : "Post"}
-              </button>
-            </div>
-          </div>
-
-          {error && <p style={{ color: "var(--danger)", fontSize: 11.5, marginTop: 8 }}>{error}</p>}
         </div>
       </div>
+
+      <div className="flex items-center justify-between border-t border-border/60 px-3.5 py-2">
+        <div className="flex items-center gap-1">
+          <input
+            ref={picker}
+            type="file"
+            accept="image/*"
+            multiple
+            hidden
+            onChange={(event) => void attach(event.target.files)}
+          />
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-8 text-muted-foreground hover:text-primary"
+            disabled={busy}
+            onClick={() => picker.current?.click()}
+            title="Attach an image"
+          >
+            <ImageIcon className="size-4" />
+          </Button>
+          {remaining < 100 && (
+            <span className="text-xs text-muted-foreground tabular-nums">{remaining}</span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {chainSeq !== undefined && (
+            <span className="text-[11px] text-muted-foreground">event {chainSeq}</span>
+          )}
+          <Button size="sm" disabled={!text.trim() || busy} onClick={() => void send()}>
+            {busy ? "sending…" : "Post"}
+          </Button>
+        </div>
+      </div>
+
+      {error && <p className="px-3.5 pb-3 text-xs text-destructive">{error}</p>}
     </div>
   );
 }

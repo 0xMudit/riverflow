@@ -34,21 +34,6 @@ export default function App() {
   const [results, setResults] = useState<PostView[] | null>(null);
 
   useEffect(() => {
-    const clean = query.trim();
-    if (!clean) {
-      setResults(null);
-      return;
-    }
-    const timer = setTimeout(() => {
-      void window.river
-        .search(clean)
-        .then((found) => setResults(found))
-        .catch(() => undefined);
-    }, 250);
-    return () => clearTimeout(timer);
-  }, [query]);
-
-  useEffect(() => {
     let alive = true;
     const load = () => {
       void window.river
@@ -69,6 +54,21 @@ export default function App() {
       alive = false;
     };
   }, [snapshot?.me?.seq]);
+
+  useEffect(() => {
+    const clean = query.trim();
+    if (!clean) {
+      setResults(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      void window.river
+        .search(clean)
+        .then((found) => setResults(found))
+        .catch(() => undefined);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [query]);
 
   /**
    * Seal an event.
@@ -93,11 +93,11 @@ export default function App() {
         // Wallets write 0x in front of a signature; the log keeps plain hex.
         sig: signature.startsWith("0x") ? signature.slice(2) : signature,
       });
-      notify(`Sealed · event ${event.seq} in your chain`);
+      notify("Sent");
       return event;
     }
     const event = await publish(kind, body, device || undefined);
-    notify(`Sealed · event ${event.seq} in your chain`);
+    notify("Sent");
     return event;
   };
 
@@ -135,7 +135,7 @@ export default function App() {
 
   return (
     <>
-      <div className="shell">
+      <div className="mx-auto flex w-full max-w-[1240px] items-start justify-center">
         <LeftRail
           snapshot={snapshot}
           identity={openIdentity}
@@ -147,22 +147,11 @@ export default function App() {
           onSearch={setQuery}
         />
 
-        <main className="feed-col">
-          <div className="current" />
-
+        <main className="min-w-0 max-w-[640px] flex-1 border-x border-border/50 pb-24">
           {error && (
-            <div
-              style={{
-                margin: "14px 0 0",
-                fontSize: 12,
-                color: "var(--danger)",
-                display: "flex",
-                gap: 10,
-                alignItems: "center",
-              }}
-            >
-              <span>{error}</span>
-              <button className="btn btn-ghost" onClick={() => void refresh()}>
+            <div className="flex items-center gap-3 border-b border-border/60 px-4 py-2.5 text-sm text-destructive">
+              <span className="truncate">{error}</span>
+              <button className="ml-auto text-xs underline" onClick={() => void refresh()}>
                 retry
               </button>
             </div>
@@ -191,8 +180,6 @@ export default function App() {
               identity={openIdentity}
               notify={notify}
               onOpenProfile={(pubkey) => setView({ name: "profile", pubkey })}
-              thisDevice={thisDevice}
-              devices={devices}
             />
           )}
 
@@ -237,27 +224,17 @@ function Boot({ error, boot }: { error: string | null; boot: BootStatus | null }
   const [resetting, setResetting] = useState(false);
 
   return (
-    <div
-      style={{
-        height: "100vh",
-        display: "grid",
-        placeItems: "center",
-        padding: 24,
-      }}
-    >
-      <div style={{ textAlign: "center", maxWidth: 420 }}>
-        <div className="wordmark" style={{ fontSize: 30 }}>
-          River<em>.</em>
-        </div>
-        <p className="meta" style={{ marginTop: 12, lineHeight: 1.7 }}>
+    <div className="grid h-screen place-items-center px-6">
+      <div className="max-w-md text-center">
+        <div className="wordmark text-3xl">River<em>.</em></div>
+        <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
           {error ?? "starting your node, opening the ledger…"}
         </p>
 
         {boot?.identityLocked ? (
           <>
             <button
-              className="btn btn-primary"
-              style={{ marginTop: 18 }}
+              className="mt-5 rounded-full bg-primary px-5 py-2 text-sm font-medium text-primary-foreground"
               disabled={resetting}
               onClick={() => {
                 setResetting(true);
@@ -266,16 +243,13 @@ function Boot({ error, boot }: { error: string | null; boot: BootStatus | null }
             >
               {resetting ? "restarting…" : "start a new identity"}
             </button>
-            <p className="meta" style={{ marginTop: 14, fontSize: 11, lineHeight: 1.6 }}>
+            <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
               The unreadable key file is renamed, not deleted. Anything it signed stays in the
               ledger and on the network — but this machine can no longer write as it.
             </p>
           </>
         ) : (
-          <div
-            className="skeleton"
-            style={{ height: 2, marginTop: 22, width: 220, marginInline: "auto" }}
-          />
+          <div className="mx-auto mt-5 h-0.5 w-56 animate-pulse rounded-full bg-border" />
         )}
       </div>
     </div>

@@ -1,8 +1,9 @@
 import type { PostView, Snapshot } from "@/core/types";
 import { Composer } from "../components/Composer";
 import { PostCard } from "../components/PostCard";
-import { plural, profileOf } from "../format";
+import { plural } from "../format";
 import type { PublishFn } from "../useNode";
+import { Button } from "@/ui/button";
 
 export function RiverPage({
   snapshot,
@@ -47,71 +48,47 @@ export function RiverPage({
 
   return (
     <>
-      <header
-        style={{
-          display: "flex",
-          alignItems: "flex-end",
-          justifyContent: "space-between",
-          gap: 16,
-          padding: "20px 0 0",
-        }}
-      >
+      <header className="sticky top-0 z-10 flex items-end justify-between gap-4 border-b border-border/60 bg-background/90 px-4 py-3.5 backdrop-blur">
         <div>
-          <h1 className="serif" style={{ fontSize: 23, lineHeight: 1.1, letterSpacing: "-0.01em" }}>
-            The river
-          </h1>
-          <p className="meta" style={{ marginTop: 6 }}>
-            {plural(snapshot.stats.posts, "post")} · {plural(snapshot.stats.events, "event")} · all of it
-            permanent
+          <h1 className="font-serif text-[22px] leading-none tracking-tight">The river</h1>
+          <p className="mt-1.5 text-xs text-muted-foreground">
+            {plural(snapshot.stats.posts, "post")} · {plural(snapshot.stats.events, "event")} · all of
+            it permanent
           </p>
         </div>
-        <button
-          className="btn"
+        <Button
+          variant="ghost"
+          size="sm"
           onClick={onToggleSilt}
-          style={
-            includeSilt
-              ? {
-                  color: "var(--silt)",
-                  borderColor: "rgba(201,168,119,0.4)",
-                  background: "var(--silt-wash)",
-                }
-              : undefined
-          }
+          className={includeSilt ? "text-silt" : "text-muted-foreground"}
           title="Retracted posts are hidden from the flow, never removed from the chain"
         >
-          silt {siltCount > 0 ? siltCount : ""}
-        </button>
+          Silt{siltCount > 0 ? ` ${siltCount}` : ""}
+        </Button>
       </header>
 
-      {!iAmNamed && (
-        <div
-          className="panel"
-          style={{ marginTop: 16, padding: "20px 22px", borderColor: "rgba(91,217,194,0.24)" }}
-        >
-          <h2 className="serif" style={{ fontSize: 19, margin: 0 }}>
-            This is your river.
-          </h2>
-          <p className="serif" style={{ fontSize: 14, lineHeight: 1.65, color: "var(--ink-dim)", marginTop: 8 }}>
-            No account, no server, no feed algorithm. Everything you write is signed by a key that
-            lives on this machine, kept in your chain for good, and shared with anyone you point
-            your node at.
-          </p>
-          <div style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
-            <button className="btn btn-primary" onClick={onOpenYou}>
-              Choose a name
-            </button>
-            <button className="btn" onClick={onOpenNetwork}>
-              Find people
-            </button>
+      <div className="px-4 py-4">
+        {!iAmNamed && (
+          <div className="mb-4 rounded-2xl border border-primary/25 bg-primary/[0.04] p-5">
+            <h2 className="font-serif text-[19px] leading-tight">This is your river.</h2>
+            <p className="mt-2 font-serif text-[15px] leading-relaxed text-muted-foreground">
+              No account, no server, no feed algorithm. Everything you write is signed by a key that
+              lives on this machine, kept in your chain for good, and shared with anyone you point
+              your node at.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Button onClick={onOpenYou}>Choose a name</Button>
+              <Button variant="outline" onClick={onOpenNetwork}>
+                Find people
+              </Button>
+            </div>
+            <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+              It is quiet right now: nobody else is here. Share your address, or let the network
+              introduce you.
+            </p>
           </div>
-          <p className="meta" style={{ marginTop: 12, lineHeight: 1.6 }}>
-            Right now it is quiet: nobody else is here. Share your address, or let the network
-            introduce you.
-          </p>
-        </div>
-      )}
+        )}
 
-      <div style={{ marginTop: 18 }}>
         <Composer
           me={{ pubkey: me, name: snapshot.profiles[me]?.name ?? "you", hue: snapshot.profiles[me]?.hue ?? 200 }}
           chainSeq={snapshot.me?.seq ?? 0}
@@ -120,102 +97,94 @@ export function RiverPage({
         />
       </div>
 
-      <div style={{ marginTop: 24, borderTop: "1px solid var(--line)" }}>
-        {results !== null ? (
-          <>
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "baseline",
-                padding: "14px 0 4px",
-              }}
-            >
-              <span className="label">search</span>
-              <button className="btn btn-ghost" style={{ fontSize: 11 }} onClick={onClearSearch}>
-                back to the river
-              </button>
-            </div>
-            {results.length === 0 && (
-              <div style={{ padding: "40px 20px", textAlign: "center" }}>
-                <p className="serif" style={{ fontSize: 16, color: "var(--ink-dim)" }}>
-                  Nothing you keep says that.
-                </p>
+      {results !== null ? (
+        <div>
+          <div className="flex items-center justify-between border-y border-border/60 px-4 py-2.5">
+            <span className="label text-[9px]">search</span>
+            <Button variant="ghost" size="sm" onClick={onClearSearch}>
+              Back to the river
+            </Button>
+          </div>
+          {results.length === 0 ? (
+            <p className="px-4 py-12 text-center font-serif text-muted-foreground">
+              Nothing you keep says that.
+            </p>
+          ) : (
+            results.map((post) => (
+              <div key={post.id} className="border-b border-border/50">
+                <PostCard
+                  post={post}
+                  profiles={snapshot.profiles}
+                  me={me}
+                  publish={publish}
+                  notify={notify}
+                  onOpenProfile={onOpenProfile}
+                />
               </div>
-            )}
-            {results.map((post) => (
-              <PostCard
-                key={post.id}
-                post={post}
-                profiles={snapshot.profiles}
-                me={me}
-                publish={publish}
-                notify={notify}
-                onOpenProfile={onOpenProfile}
-              />
-            ))}
-          </>
-        ) : (
-          <>
-            {snapshot.posts.length === 0 && (
-              <div style={{ padding: "46px 20px", textAlign: "center" }}>
-                <p className="serif" style={{ fontSize: 16, color: "var(--ink-dim)" }}>
-                  The river is quiet.
-                </p>
-                <p className="meta" style={{ marginTop: 6 }}>
-                  Drop the first stone — it stays.
-                </p>
-              </div>
-            )}
-
-            {snapshot.posts.map((post) => {
-          const replies = (repliesByRoot.get(post.id) ?? []).filter(
-            (reply) => includeSilt || !reply.retracted,
-          );
-          return (
-            <div key={post.id}>
-              <PostCard
-                post={post}
-                profiles={snapshot.profiles}
-                me={me}
-                publish={publish}
-                notify={notify}
-                onOpenProfile={onOpenProfile}
-              />
-              {replies.length > 0 && (
-                <div style={{ background: "rgba(0,0,0,0.14)", paddingBottom: 4 }}>
-                  {replies.map((reply) => {
-                    const parent = reply.replyTo ? snapshot.profiles[reply.replyTo] : null;
-                    return (
-                      <PostCard
-                        key={reply.id}
-                        post={reply}
-                        profiles={snapshot.profiles}
-                        me={me}
-                        publish={publish}
-                        notify={notify}
-                        onOpenProfile={onOpenProfile}
-                        isReply
-                        replyContext={
-                          reply.replyTo && reply.replyTo !== post.id && parent
-                            ? { name: parent.name }
-                            : undefined
-                        }
-                      />
-                    );
-                  })}
-                </div>
-              )}
+            ))
+          )}
+        </div>
+      ) : (
+        <div>
+          {snapshot.posts.length === 0 && (
+            <div className="px-4 py-16 text-center">
+              <p className="font-serif text-lg text-muted-foreground">The river is quiet.</p>
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                Drop the first stone — it stays.
+              </p>
             </div>
-          );
-        })}
-          </>
-        )}
-      </div>
+          )}
 
-      <p className="meta" style={{ marginTop: 22, lineHeight: 1.7 }}>
-        Your chain is at seq {snapshot.me?.seq ?? -1} · {plural(snapshot.stats.events, "signed event")} in
-        total · {snapshot.peers.length === 0 ? "no peers connected" : `${plural(snapshot.peers.length, "peer")} connected`}.
+          {snapshot.posts.map((post) => {
+            const replies = (repliesByRoot.get(post.id) ?? []).filter(
+              (reply) => includeSilt || !reply.retracted,
+            );
+            return (
+              <div key={post.id} className="border-b border-border/50">
+                <PostCard
+                  post={post}
+                  profiles={snapshot.profiles}
+                  me={me}
+                  publish={publish}
+                  notify={notify}
+                  onOpenProfile={onOpenProfile}
+                />
+                {replies.length > 0 && (
+                  <div className="bg-background/40 pb-1">
+                    {replies.map((reply) => {
+                      const parent = reply.replyTo ? snapshot.profiles[reply.replyTo] : null;
+                      return (
+                        <PostCard
+                          key={reply.id}
+                          post={reply}
+                          profiles={snapshot.profiles}
+                          me={me}
+                          publish={publish}
+                          notify={notify}
+                          onOpenProfile={onOpenProfile}
+                          isReply
+                          replyContext={
+                            reply.replyTo && reply.replyTo !== post.id && parent
+                              ? { name: parent.name }
+                              : undefined
+                          }
+                        />
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <p className="px-4 py-6 text-xs leading-relaxed text-muted-foreground">
+        Your chain is at event {snapshot.me?.seq ?? -1} ·{" "}
+        {plural(snapshot.stats.events, "signed event")} in total ·{" "}
+        {snapshot.peers.length === 0
+          ? "no peers connected"
+          : `${plural(snapshot.peers.length, "peer")} connected`}.
       </p>
     </>
   );

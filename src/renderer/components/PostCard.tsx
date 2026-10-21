@@ -1,10 +1,20 @@
 import { useState } from "react";
+import { Heart, MessageCircle, MoreHorizontal, Pencil, EyeOff, Ban, Trash2, ScrollText, Link2 } from "lucide-react";
 import type { Event, PostView, ProfileView } from "@/core/types";
 import { profileOf, shortAddr, shortHash, timeAgo } from "../format";
 import type { PublishFn } from "../useNode";
 import { Avatar } from "./Avatar";
 import { Composer } from "./Composer";
 import { Copyable } from "./Copy";
+import { Button } from "@/ui/button";
+import { Badge } from "@/ui/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/ui/dropdown-menu";
 
 const KIND_LABEL: Record<string, string> = {
   post: "written",
@@ -15,12 +25,10 @@ const KIND_LABEL: Record<string, string> = {
 
 function TrailRow({ event }: { event: Event }) {
   return (
-    <div className="trail-row">
-      <span className="label" style={{ fontSize: 9 }}>
-        {KIND_LABEL[event.kind] ?? event.kind}
-      </span>
-      <span className="mono" style={{ color: "var(--ink-dim)", overflow: "hidden" }}>
-        <span style={{ color: "var(--ink-faint)" }}>#{event.seq}</span>{" "}
+    <div className="flex items-baseline gap-2 py-1.5 text-xs">
+      <span className="label text-[9px]">{KIND_LABEL[event.kind] ?? event.kind}</span>
+      <span className="mono truncate text-muted-foreground">
+        <span className="opacity-50">#{event.seq}</span>{" "}
         <Copyable
           value={event.id}
           label={shortHash(event.id, 8, 6)}
@@ -28,17 +36,17 @@ function TrailRow({ event }: { event: Event }) {
           title={`event ${event.id}`}
         />
         {event.kind === "retract" && event.body.reason ? (
-          <span style={{ color: "var(--silt)" }}> — “{event.body.reason}”</span>
+          <span className="text-silt"> — “{event.body.reason}”</span>
         ) : null}
         {event.kind === "edit" ? (
-          <span style={{ color: "var(--ink-faint)" }}>
+          <span className="opacity-60">
             {" "}
             → “{(event.body.text ?? "").slice(0, 36)}
             {(event.body.text ?? "").length > 36 ? "…" : ""}”
           </span>
         ) : null}
       </span>
-      <span className="mono" style={{ color: "var(--water)", fontSize: 10.5 }} title="signature verified on ingest">
+      <span className="mono ml-auto shrink-0 text-[10px] text-primary" title="signature verified on ingest">
         ✓
       </span>
     </div>
@@ -110,9 +118,25 @@ export function PostCard({
     try {
       await publish("edit", { target: post.id, text: next });
       setEditing(false);
-      notify("Edit sealed — the old text stays on your chain");
+      notify("Edited — the old text stays on your chain");
     } catch (cause) {
       notify(cause instanceof Error ? cause.message : "could not edit");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retract = async () => {
+    const confirmed = window.confirm(
+      "Retract this post?\n\nIt will disappear from the river, but it is not deleted. The words stay on your chain forever, and this retraction becomes an event of its own.",
+    );
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      await publish("retract", { target: post.id, reason: "retracted by author" });
+      notify("Retracted — the words remain on the chain");
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "could not retract");
     } finally {
       setBusy(false);
     }
@@ -121,12 +145,12 @@ export function PostCard({
   /** Hide this person from your feed. Nothing is deleted; you can undo it. */
   const blockAuthor = async () => {
     const confirmed = window.confirm(
-      `Block ${author.name}?\n\nTheir posts leave your feed. Nothing is deleted — their history stays on the network — and you can undo this under The network.`,
+      `Block ${author.name}?\n\nTheir posts leave your feed. Nothing is deleted — their history stays on the network — and you can undo this under You.`,
     );
     if (!confirmed) return;
     try {
       await window.river.block(post.author);
-      notify(`${author.name} is blocked — undo it under The network`);
+      notify(`${author.name} is blocked — undo it under You`);
     } catch (cause) {
       notify(cause instanceof Error ? cause.message : "could not block that");
     }
@@ -146,132 +170,90 @@ export function PostCard({
     }
   };
 
-  const retract = async () => {    const confirmed = window.confirm(
-      "Retract this post?\n\nIt will disappear from the river, but it is not deleted. The words stay on your chain forever, and this retraction becomes an event of its own.",
-    );
-    if (!confirmed) return;
-    setBusy(true);
-    try {
-      await publish("retract", { target: post.id, reason: "retracted by author" });
-      notify("Retracted — the words remain on the chain");
-    } catch (cause) {
-      notify(cause instanceof Error ? cause.message : "could not retract");
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
-    <article className={`post ${blocked ? "post-silt" : ""} ${isReply ? "post-reply" : ""}`}>
-      <header style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+    <article
+      className={`px-4 py-3.5 transition-colors hover:bg-accent/25 ${
+        isReply ? "border-l-2 border-l-transparent" : ""
+      } ${blocked ? "opacity-70" : ""}`}
+    >
+      <div className="flex items-start gap-3">
         <button onClick={() => onOpenProfile(post.author)} aria-label={`Open ${author.name}`}>
-          <Avatar name={author.name} hue={author.hue} size={isReply ? 26 : 32} title={post.author} />
+          <Avatar name={author.name} hue={author.hue} size={isReply ? "sm" : "md"} title={post.author} />
         </button>
 
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap" }}>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-1.5 text-sm">
             <button
-              className="name"
+              className="truncate font-semibold hover:underline"
               onClick={() => onOpenProfile(post.author)}
-              style={{ textAlign: "left" }}
             >
               {author.name}
             </button>
             {isReply && replyContext && (
-              <span className="meta" style={{ fontSize: 10 }}>
-                ↳ {replyContext.name}
-              </span>
+              <span className="truncate text-xs text-muted-foreground">↳ {replyContext.name}</span>
             )}
-            {blocked && <span className="chip chip-silt">retracted</span>}
+            {blocked && (
+              <Badge variant="secondary" className="h-5 px-1.5 text-[10px] text-silt">
+                retracted
+              </Badge>
+            )}
             <span
-              className="meta"
-              style={{ marginLeft: "auto" }}
+              className="ml-auto shrink-0 text-xs text-muted-foreground"
               title={new Date(post.createdAt).toLocaleString()}
             >
               {timeAgo(post.createdAt)}
             </span>
           </div>
 
-          <div className="meta" style={{ marginTop: 3, display: "flex", gap: 8, alignItems: "center" }}>
-            <span>{shortAddr(post.author)}</span>
-            <span style={{ opacity: 0.4 }}>·</span>
-            <span title={`event ${post.seq} in ${author.name}'s chain`}>seq {post.seq}</span>
-            {post.device && (
-              <>
-                <span style={{ opacity: 0.4 }}>·</span>
-                <span title={`written by the device ${post.device}`}>device {shortAddr(post.device)}</span>
-              </>
-            )}
-          </div>
-
           {editing ? (
-            <div style={{ marginTop: 10 }}>
+            <div className="mt-2">
               <textarea
-                className="textarea"
+                className="prose-post w-full resize-y rounded-md border border-input bg-transparent p-2.5 text-sm outline-none focus:border-ring"
                 rows={4}
                 value={draft}
                 maxLength={2000}
                 onChange={(event) => setDraft(event.target.value)}
                 autoFocus
               />
-              <div style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "center" }}>
-                <button className="btn btn-primary" disabled={busy} onClick={() => void saveEdit()}>
-                  {busy ? "sealing…" : "Seal edit"}
-                </button>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setEditing(false);
-                    setDraft(post.text);
-                  }}
-                >
+              <div className="mt-2 flex items-center gap-2">
+                <Button size="sm" disabled={busy} onClick={() => void saveEdit()}>
+                  {busy ? "saving…" : "Save"}
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
                   Cancel
-                </button>
-                <span className="meta" style={{ marginLeft: "auto" }}>
-                  old text stays
-                </span>
+                </Button>
+                <span className="ml-auto text-xs text-muted-foreground">the old text stays</span>
               </div>
             </div>
           ) : blocked ? (
-            <div style={{ marginTop: 9 }}>
+            <div className="mt-1.5">
               {revealed ? (
-                <p className="post-text post-text-silt">{post.text}</p>
+                <p className="prose-post text-muted-foreground">{post.text}</p>
               ) : (
-                <p className="serif" style={{ fontSize: 13.5, color: "var(--ink-faint)", lineHeight: 1.55 }}>
+                <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
                   This post was retracted by its author. Nothing was erased.
                 </p>
               )}
-              <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-                <button
-                  className="btn btn-ghost"
-                  style={{ fontSize: 11 }}
-                  onClick={() => setRevealed((value) => !value)}
-                >
-                  {revealed ? "hide the silt" : "reveal the original"}
-                </button>
-                <span className="meta" style={{ fontSize: 10 }}>
-                  silt in this chain
-                </span>
+              <div className="mt-2 flex items-center gap-2">
+                <Button size="sm" variant="ghost" onClick={() => setRevealed((value) => !value)}>
+                  {revealed ? "hide" : "show the original"}
+                </Button>
+                <span className="text-xs text-muted-foreground">it is still in the chain</span>
               </div>
             </div>
           ) : (
             <>
-              <p className="post-text" style={{ marginTop: 7 }}>
-                {post.text}
-              </p>
+              <p className="prose-post mt-1">{post.text}</p>
               {post.media && post.media.length > 0 && (
-                <div className="post-media">
+                <div className="mt-2.5 flex flex-wrap gap-2">
                   {post.media.map((item) => (
                     <img
                       key={item.hash}
                       src={`river://blob/${item.hash}`}
                       alt=""
                       loading="lazy"
-                      style={
-                        item.width && item.height
-                          ? { aspectRatio: `${item.width} / ${item.height}` }
-                          : undefined
-                      }
+                      className="max-h-96 w-auto max-w-full rounded-xl border border-border object-contain"
+                      title={item.width && item.height ? `${item.width}×${item.height}` : undefined}
                     />
                   ))}
                 </div>
@@ -279,144 +261,104 @@ export function PostCard({
             </>
           )}
 
-          <footer
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 2,
-              marginTop: 9,
-              marginLeft: -6,
-              flexWrap: "wrap",
-            }}
-          >
+          <div className="mt-1.5 flex items-center gap-1 text-muted-foreground">
             {!blocked && (
               <>
-                <button
-                  className="btn btn-ghost"
-                  style={{ fontSize: 11.5, color: post.viewerReacted ? "var(--water)" : undefined }}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className={`h-8 gap-1.5 px-2 ${post.viewerReacted ? "text-primary" : ""}`}
                   onClick={() => void react()}
-                  title={post.viewerReacted ? "Withdraw your ripple (it stays on your chain)" : "Leave a ripple"}
+                  title={post.viewerReacted ? "Take it back (it stays on your chain)" : "Ripple"}
                 >
-                  ≈ {post.reactions > 0 ? post.reactions : ""}
-                </button>
-                <button className="btn btn-ghost" style={{ fontSize: 11.5 }} onClick={() => setReplying((v) => !v)}>
-                  reply{post.replyCount > 0 ? ` ${post.replyCount}` : ""}
-                </button>
+                  <Heart className={post.viewerReacted ? "size-4 fill-current" : "size-4"} />
+                  {post.reactions > 0 && <span className="text-xs tabular-nums">{post.reactions}</span>}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 gap-1.5 px-2"
+                  onClick={() => setReplying((value) => !value)}
+                >
+                  <MessageCircle className="size-4" />
+                  {post.replyCount > 0 && <span className="text-xs tabular-nums">{post.replyCount}</span>}
+                </Button>
               </>
             )}
 
-            <button
-              className="btn btn-ghost"
-              style={{ fontSize: 13, lineHeight: 1 }}
-              onClick={() => setMenu((value) => !value)}
-              aria-label="More actions"
-              title="More"
-            >
-              ⋯
-            </button>
-
-            <span className="mono" style={{ marginLeft: "auto", fontSize: 10, color: "var(--ink-faint)" }}>
-              ✓ signed
-            </span>
-          </footer>
-
-          {menu && (
-            <div
-              className="panel"
-              style={{
-                marginTop: 8,
-                padding: "6px 8px",
-                display: "grid",
-                gap: 2,
-                justifySelf: "start",
-                minWidth: 170,
-              }}
-            >
-              <button
-                className="btn btn-ghost"
-                style={{ fontSize: 11.5, justifyContent: "flex-start" }}
-                onClick={() => {
-                  setMenu(false);
-                  void openTrail();
-                }}
-              >
-                provenance
-              </button>
-              {isMine && !blocked && (
-                <button
-                  className="btn btn-ghost"
-                  style={{ fontSize: 11.5, justifyContent: "flex-start" }}
-                  onClick={() => {
-                    setMenu(false);
-                    setEditing(true);
-                  }}
-                >
-                  edit
-                </button>
-              )}
-              {isMine && !blocked && (
-                <button
-                  className="btn btn-ghost"
-                  style={{ fontSize: 11.5, justifyContent: "flex-start", color: "var(--silt)" }}
-                  onClick={() => {
-                    setMenu(false);
-                    void retract();
-                  }}
-                >
-                  retract
-                </button>
-              )}
-              {!blocked && (
-                <button
-                  className="btn btn-ghost"
-                  style={{ fontSize: 11.5, justifyContent: "flex-start" }}
-                  onClick={() => {
-                    setMenu(false);
-                    setFiltering(true);
-                  }}
-                >
-                  hide a word
-                </button>
-              )}
-              {!isMine && !blocked && (
-                <button
-                  className="btn btn-ghost"
-                  style={{ fontSize: 11.5, justifyContent: "flex-start" }}
-                  onClick={() => {
-                    setMenu(false);
-                    void blockAuthor();
-                  }}
-                >
-                  block
-                </button>
-              )}
-            </div>
-          )}
+            <DropdownMenu open={menu} onOpenChange={setMenu}>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" className="h-8 w-8 p-0" aria-label="More">
+                  <MoreHorizontal className="size-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-52">
+                <DropdownMenuItem onSelect={() => void navigator.clipboard?.writeText(post.id)}>
+                  <Link2 className="size-4" />
+                  Copy link
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => void openTrail()}>
+                  <ScrollText className="size-4" />
+                  Provenance
+                </DropdownMenuItem>
+                {isMine && !blocked && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onSelect={() => setEditing(true)}>
+                      <Pencil className="size-4" />
+                      Edit
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() => void retract()}
+                      className="text-silt focus:text-silt"
+                    >
+                      <Trash2 className="size-4" />
+                      Retract
+                    </DropdownMenuItem>
+                  </>
+                )}
+                {!blocked && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onSelect={() => setFiltering(true)}>
+                      <EyeOff className="size-4" />
+                      Hide a word
+                    </DropdownMenuItem>
+                  </>
+                )}
+                {!isMine && !blocked && (
+                  <DropdownMenuItem onSelect={() => void blockAuthor()}>
+                    <Ban className="size-4" />
+                    Block
+                  </DropdownMenuItem>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
 
           {filtering && !blocked && (
-            <div style={{ marginTop: 10, display: "flex", gap: 6, alignItems: "center" }}>
+            <div className="mt-2 flex items-center gap-2">
               <input
-                className="input"
+                className="h-9 w-56 rounded-md border border-input bg-transparent px-2.5 text-sm outline-none focus:border-ring"
                 placeholder="a word to hide"
                 value={word}
                 onChange={(event) => setWord(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") void hideWord();
                 }}
-                style={{ fontSize: 11.5, maxWidth: 220 }}
                 autoFocus
               />
-              <button className="btn" disabled={!word.trim()} onClick={() => void hideWord()}>
-                hide posts
-              </button>
-              <button className="btn btn-ghost" onClick={() => setFiltering(false)}>
-                cancel
-              </button>
+              <Button size="sm" disabled={!word.trim()} onClick={() => void hideWord()}>
+                Hide posts
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setFiltering(false)}>
+                Cancel
+              </Button>
             </div>
           )}
 
           {replying && !blocked && (
-            <div style={{ marginTop: 10 }}>
+            <div className="mt-2">
               <Composer
                 me={
                   me
@@ -433,33 +375,23 @@ export function PostCard({
           )}
 
           {showTrail && (
-            <div
-              style={{
-                marginTop: 12,
-                border: "1px solid var(--line)",
-                borderRadius: 8,
-                background: "rgba(0,0,0,0.22)",
-                padding: "4px 12px 6px",
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "space-between", padding: "6px 0" }}>
-                <span className="label" style={{ fontSize: 9 }}>
-                  Provenance
-                </span>
-                <span className="meta" style={{ fontSize: 10 }}>
+            <div className="mt-3 rounded-lg border border-border bg-background/60 px-3 py-1.5">
+              <div className="flex items-center justify-between py-1.5">
+                <span className="label text-[9px]">Provenance</span>
+                <span className="text-[10px] text-muted-foreground">
                   {trail ? `${trail.length} event${trail.length === 1 ? "" : "s"}` : "reading…"} · immutable
                 </span>
               </div>
               {(trail ?? []).map((event) => (
                 <TrailRow key={event.id} event={event} />
               ))}
-              <div className="meta" style={{ fontSize: 10, padding: "6px 0 8px", lineHeight: 1.5 }}>
+              <p className="pb-2 pt-1.5 text-[10px] leading-relaxed text-muted-foreground">
                 Every line above is a signature. None of it can be withdrawn.
-              </div>
+              </p>
             </div>
           )}
         </div>
-      </header>
+      </div>
     </article>
   );
 }

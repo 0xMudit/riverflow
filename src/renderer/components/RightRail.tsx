@@ -1,23 +1,13 @@
 import { useState } from "react";
+import { Radio, UserPlus } from "lucide-react";
 import type { Snapshot } from "@/core/types";
 import { plural, shortAddr } from "../format";
 import type { View } from "../App";
 import type { PublishFn } from "../useNode";
 import { Avatar } from "./Avatar";
 import { Copyable } from "./Copy";
-
-function Stat({ value, label }: { value: number | string; label: string }) {
-  return (
-    <div className="stat-cell">
-      <div className="mono" style={{ fontSize: 15, color: "var(--ink)", lineHeight: 1.2 }}>
-        {value}
-      </div>
-      <div className="label" style={{ fontSize: 9, marginTop: 3 }}>
-        {label}
-      </div>
-    </div>
-  );
-}
+import { Button } from "@/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/ui/card";
 
 export function RightRail({
   snapshot,
@@ -36,7 +26,7 @@ export function RightRail({
 
   const suggestions = Object.values(snapshot.profiles)
     .filter((profile) => profile.pubkey !== me?.pubkey && !following.has(profile.pubkey))
-    .slice(0, 4);
+    .slice(0, 3);
 
   const verify = async () => {
     setVerifying(true);
@@ -44,8 +34,8 @@ export function RightRail({
       const report = await window.river.verify();
       notify(
         report.ok
-          ? `Verified ${plural(report.events, "event")} across ${plural(report.authors, "chain")} in ${report.durationMs}ms`
-          : `Verification failed: ${report.errors[0]?.detail ?? "unknown error"}`,
+          ? `Verified ${plural(report.events, "event")} — every link and signature holds`
+          : "Verification failed",
       );
     } catch (cause) {
       notify(cause instanceof Error ? cause.message : "could not verify");
@@ -66,113 +56,85 @@ export function RightRail({
   const peers = snapshot.peers.length;
 
   return (
-    <aside className="rail rail-right">
-      <section className="panel" style={{ overflow: "hidden" }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            padding: "11px 12px",
-          }}
-        >
-          <span className="label">Your node</span>
-          <span className="chip" style={{ borderColor: "transparent", background: "transparent" }}>
-            <span
-              style={{
-                width: 5,
-                height: 5,
-                borderRadius: 99,
-                background: peers > 0 ? "var(--water)" : "var(--silt)",
-                boxShadow: peers > 0 ? "0 0 7px rgba(91,217,194,0.9)" : "none",
-              }}
-            />
-            {peers > 0 ? "connected" : "alone"}
-          </span>
-        </div>
+    <aside className="sticky top-0 flex h-screen w-[320px] shrink-0 flex-col gap-4 overflow-y-auto px-2 py-4">
+      <Card className="border-border/70 bg-card/50">
+        <CardHeader className="px-4 py-3">
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <Radio className={peers > 0 ? "size-4 text-primary" : "size-4 text-muted-foreground"} />
+            Your node
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="px-4 pb-4">
+          <p className="text-sm text-muted-foreground">
+            {plural(snapshot.stats.events, "event")} · {plural(snapshot.stats.authors, "person", "people")} ·{" "}
+            {peers === 0 ? "alone" : plural(peers, "peer")}
+          </p>
 
-        <div className="stat-grid">
-          <Stat value={peers} label={peers === 1 ? "peer" : "peers"} />
-          <Stat value={(me?.seq ?? -1) + 1} label="your chain" />
-          <Stat value={snapshot.stats.events} label="events" />
-          <Stat value={snapshot.stats.authors} label="identities" />
-        </div>
-
-        <div style={{ padding: "10px 12px 12px" }}>
-          <div className="label" style={{ fontSize: 9, marginBottom: 6 }}>
-            your address
+          <div className="mt-3">
+            <div className="label mb-1.5 text-[9px]">your address</div>
+            {snapshot.listen ? (
+              <Copyable
+                value={snapshot.listen}
+                label={snapshot.listen}
+                className="mono text-xs text-muted-foreground"
+                title="Share this with someone, or add theirs"
+              />
+            ) : (
+              <span className="text-xs text-muted-foreground">not listening</span>
+            )}
           </div>
-          {snapshot.listen ? (
-            <Copyable
-              value={snapshot.listen}
-              label={snapshot.listen}
-              className="mono"
-              title="Share this with someone on your network, or add theirs"
-            />
-          ) : (
-            <span className="meta">not listening</span>
-          )}
 
-          <div style={{ display: "flex", gap: 6, marginTop: 10 }}>
-            <button className="btn" style={{ flex: 1, fontSize: 12 }} onClick={() => void verify()} disabled={verifying}>
+          <div className="mt-4 flex gap-2">
+            <Button size="sm" variant="outline" className="flex-1" disabled={verifying} onClick={() => void verify()}>
               {verifying ? "checking…" : "Verify"}
-            </button>
-            <button
-              className="btn"
-              style={{ flex: 1, fontSize: 12 }}
-              onClick={() => onNavigate({ name: "network" })}
-            >
-              Network
-            </button>
+            </Button>
+            <Button size="sm" className="flex-1" onClick={() => onNavigate({ name: "network" })}>
+              Find people
+            </Button>
           </div>
-        </div>
-      </section>
+        </CardContent>
+      </Card>
 
       {suggestions.length > 0 && (
-        <section style={{ marginTop: 26 }}>
-          <div className="label" style={{ marginBottom: 10 }}>
-            Currents
-          </div>
-          <div style={{ display: "grid", gap: 11 }}>
+        <Card className="border-border/70 bg-card/50">
+          <CardHeader className="px-4 py-3">
+            <CardTitle className="text-sm">Who to follow</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 px-4 pb-4">
             {suggestions.map((profile) => (
-              <div key={profile.pubkey} style={{ display: "flex", gap: 9, alignItems: "center" }}>
-                <Avatar name={profile.name} hue={profile.hue} size={26} title={profile.pubkey} />
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div
-                    className="name"
-                    style={{ fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis" }}
-                  >
-                    {profile.name}
-                  </div>
-                  <div className="meta" style={{ fontSize: 10 }}>
-                    {shortAddr(profile.pubkey)}
-                  </div>
+              <div key={profile.pubkey} className="flex items-center gap-2.5">
+                <button onClick={() => onNavigate({ name: "profile", pubkey: profile.pubkey })}>
+                  <Avatar name={profile.name} hue={profile.hue} size="sm" title={profile.pubkey} />
+                </button>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium">{profile.name}</div>
+                  <div className="truncate text-[11px] text-muted-foreground">{shortAddr(profile.pubkey)}</div>
                 </div>
-                <button
-                  className="btn btn-ghost"
-                  style={{ fontSize: 11, padding: "3px 6px" }}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-8 rounded-full px-3 text-xs"
                   onClick={() => void follow(profile.pubkey)}
                 >
-                  follow
-                </button>
+                  <UserPlus className="size-3.5" />
+                  Follow
+                </Button>
               </div>
             ))}
-          </div>
-        </section>
+          </CardContent>
+        </Card>
       )}
 
-      <section style={{ marginTop: 26 }}>
-        <div className="label" style={{ marginBottom: 8 }}>
-          What this is
-        </div>
-        <p className="serif" style={{ fontSize: 12.5, lineHeight: 1.65, color: "var(--ink-dim)" }}>
-          Every post is a signed event appended to your own chain. Nothing is ever removed — a
-          retraction is itself an event, laid on top of the words it hides.
+      <div className="px-3 pb-6">
+        <div className="label mb-2 text-[9px]">What this is</div>
+        <p className="text-[13px] leading-relaxed text-muted-foreground">
+          Every post is a signed event in your own chain. Nothing is ever removed — a retraction is
+          itself an event, laid on top of the words it hides.
         </p>
-        <p className="meta" style={{ marginTop: 10, lineHeight: 1.6 }}>
+        <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">
           Your key never leaves this machine. There is no server to shut down.
         </p>
-      </section>
+      </div>
     </aside>
   );
 }

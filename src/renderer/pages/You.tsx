@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Download, Upload, Smartphone, Ban, EyeOff, Bell } from "lucide-react";
 import type { IdentityInfo, Moderation, ThisDevice, WalletInfo } from "@/core/bridge";
 import type { DeviceView, NotificationView, Snapshot } from "@/core/types";
 import { plural, shortAddr } from "../format";
@@ -6,6 +7,11 @@ import { Copyable } from "../components/Copy";
 import { WalletPanel } from "../components/WalletPanel";
 import type { PublishFn } from "../useNode";
 import type { Eip1193Provider } from "../wallet";
+import { Button } from "@/ui/button";
+import { Badge } from "@/ui/badge";
+import { Card, CardContent, CardHeader, CardTitle } from "@/ui/card";
+import { Input } from "@/ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/ui/tabs";
 
 /**
  * You.
@@ -41,6 +47,14 @@ export function YouPage({
 }) {
   const [moderation, setModeration] = useState<Moderation>({ muted: [], blocked: [], filters: [] });
   const [notifications, setNotifications] = useState<NotificationView[]>(snapshot.notifications);
+  const [local, setLocal] = useState(devices);
+
+  const me = snapshot.me;
+  const name = me?.name && me.name !== "unnamed" ? me.name : "unnamed";
+  const [draftName, setDraftName] = useState(name === "unnamed" ? "" : name);
+  const [draftBio, setDraftBio] = useState(me?.bio ?? "");
+  const [saving, setSaving] = useState(false);
+  const [secret, setSecret] = useState("");
 
   const load = () => {
     void window.river
@@ -49,21 +63,13 @@ export function YouPage({
       .catch(() => undefined);
     void window.river
       .devices()
-      .then((list) => setDevices(list))
+      .then((list) => setLocal(list))
       .catch(() => undefined);
   };
-
-  const [, setDevices] = useState<DeviceView[]>(devices);
 
   useEffect(() => {
     load();
   }, [snapshot.me?.seq]);
-
-  const me = snapshot.me;
-  const name = me?.name && me.name !== "unnamed" ? me.name : "unnamed";
-  const [draftName, setDraftName] = useState(name === "unnamed" ? "" : name);
-  const [draftBio, setDraftBio] = useState(me?.bio ?? "");
-  const [saving, setSaving] = useState(false);
 
   const saveProfile = async () => {
     if (!draftName.trim() || saving) return;
@@ -82,388 +88,445 @@ export function YouPage({
     }
   };
 
+  const backup = async () => {
+    try {
+      const key = await window.river.exportKey();
+      const payload = JSON.stringify(
+        {
+          app: "river",
+          note: "This private key is the account. Anyone holding it can speak as you. There is no reset.",
+          publicKey: identity.publicKey,
+          privateKey: key,
+          exportedAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      );
+      const url = URL.createObjectURL(new Blob([payload], { type: "application/json" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `river-key-${identity.publicKey.slice(0, 8)}.json`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      notify("Key file saved — without it, this identity cannot speak again");
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "could not export the key");
+    }
+  };
+
+  const restore = async () => {
+    if (!secret.trim()) return;
+    try {
+      await window.river.importKey(secret.trim());
+      notify("Key accepted — restarting");
+    } catch (cause) {
+      notify(cause instanceof Error ? cause.message : "that key was not accepted");
+    }
+  };
+
   return (
     <>
-      <header style={{ padding: "20px 0 0" }}>
-        <h1 className="serif" style={{ fontSize: 23, lineHeight: 1.1, letterSpacing: "-0.01em" }}>
-          You
-        </h1>
-        <p className="meta" style={{ marginTop: 6 }}>
+      <header className="sticky top-0 z-10 border-b border-border/60 bg-background/90 px-4 py-3.5 backdrop-blur">
+        <h1 className="font-serif text-[22px] leading-none tracking-tight">You</h1>
+        <p className="mt-1.5 text-xs text-muted-foreground">
           {name} · {plural(snapshot.stats.events, "event")} in your chain ·{" "}
-          {plural(snapshot.stats.authors, "identity")} known
+          {plural(snapshot.stats.authors, "person", "people")} known
         </p>
       </header>
 
-      <section className="panel" style={{ marginTop: 18, padding: "14px 16px" }}>
-        <div className="label" style={{ marginBottom: 10 }}>
-          Your profile
-        </div>
-        <div style={{ display: "grid", gap: 8, maxWidth: 420 }}>
-          <input
-            className="input"
-            placeholder="your name"
-            value={draftName}
-            maxLength={32}
-            onChange={(event) => setDraftName(event.target.value)}
-            aria-label="Your name"
-          />
-          <input
-            className="input"
-            placeholder="a line about you (optional)"
-            value={draftBio}
-            maxLength={160}
-            onChange={(event) => setDraftBio(event.target.value)}
-            aria-label="Your bio"
-          />
-          <div>
-            <button
-              className="btn btn-primary"
-              disabled={saving || !draftName.trim()}
-              onClick={() => void saveProfile()}
-            >
-              {saving ? "saving…" : "Save"}
-            </button>
-          </div>
-        </div>
-        <p className="meta" style={{ marginTop: 10, lineHeight: 1.6 }}>
-          Your name is written into your chain, so it cannot be taken away — and it cannot be
-          quietly changed either. Your old name stays where it was.
-        </p>
-      </section>
+      <div className="px-4 py-4">
+        <Tabs defaultValue="profile">
+          <TabsList className="w-full justify-start gap-1 bg-transparent p-0">
+            <TabsTrigger value="profile" className="rounded-full">
+              Profile
+            </TabsTrigger>
+            <TabsTrigger value="keys" className="rounded-full">
+              Keys
+            </TabsTrigger>
+            <TabsTrigger value="devices" className="rounded-full">
+              Devices
+            </TabsTrigger>
+            <TabsTrigger value="hidden" className="rounded-full">
+              Hidden
+            </TabsTrigger>
+            <TabsTrigger value="activity" className="rounded-full">
+              Activity
+            </TabsTrigger>
+          </TabsList>
 
-      <section className="panel" style={{ marginTop: 18, padding: "14px 16px" }}>
-        <div className="label" style={{ marginBottom: 8 }}>
-          Your key
-        </div>
-        <p className="serif" style={{ fontSize: 13, lineHeight: 1.6, color: "var(--ink-dim)" }}>
-          It lives in this machine&apos;s keychain, and it never leaves. Everything you write is
-          signed with it, and everything you write stays.
-        </p>
-        <div style={{ marginTop: 10 }}>
-          <Copyable
-            value={identity.publicKey}
-            label={shortAddr(identity.publicKey)}
-            className="mono"
-            title={identity.publicKey}
-          />
-        </div>
-        <p className="meta" style={{ marginTop: 10 }}>
-          {identity.protected ? "Sealed by the operating system" : "Held in the clear on this machine"}
-        </p>
-      </section>
-
-      <section className="panel" style={{ marginTop: 14, padding: "14px 16px" }}>
-        <WalletPanel
-          wallet={wallet}
-          onConnect={onConnectWallet}
-          onDisconnect={onDisconnectWallet}
-          notify={notify}
-        />
-        <p className="meta" style={{ marginTop: 10, lineHeight: 1.6 }}>
-          A wallet is another way to hold the same authority — MetaMask, a hardware box, anything
-          that speaks EIP-1193. It is optional; the key above works on its own.
-        </p>
-      </section>
-
-      <section className="panel" style={{ marginTop: 14, padding: "14px 16px" }}>
-        <div className="label" style={{ marginBottom: 8 }}>
-          Writing as
-        </div>
-        <p className="serif" style={{ fontSize: 13, lineHeight: 1.6, color: "var(--ink-dim)" }}>
-          Posts are signed by the key you pick here. A device writes into its own chain, so the
-          history of your identity never forks.
-        </p>
-        <div style={{ display: "flex", gap: 4, marginTop: 10, flexWrap: "wrap" }}>
-          <button
-            className={writer === "" ? "chip chip-water" : "btn btn-ghost"}
-            style={{ fontSize: 11.5 }}
-            onClick={() => onWriter("")}
-            title="The root key of this identity"
-          >
-            root key
-          </button>
-          {devices
-            .filter((device) => !device.revoked)
-            .map((device) => (
-              <button
-                key={device.device}
-                className={writer === device.device ? "chip chip-water" : "btn btn-ghost"}
-                style={{ fontSize: 11.5 }}
-                onClick={() => onWriter(device.device)}
-                title={device.device}
-              >
-                {device.name || shortAddr(device.device)}
-              </button>
-            ))}
-        </div>
-      </section>
-
-      <section className="panel" style={{ marginTop: 14, padding: "14px 16px" }}>
-        <div className="label" style={{ marginBottom: 8 }}>
-          Devices
-        </div>
-        <p className="serif" style={{ fontSize: 13, lineHeight: 1.6, color: "var(--ink-dim)" }}>
-          One identity, many machines. Each keeps its own chain, so a phone and a laptop never
-          fork your history — and a machine you no longer trust can be revoked without touching
-          the past.
-        </p>
-
-        {thisDevice && (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr auto",
-              gap: 10,
-              alignItems: "center",
-              padding: "10px 0 0",
-            }}
-          >
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 12.5 }}>this machine</div>
-              <Copyable
-                value={thisDevice.publicKey}
-                label={shortAddr(thisDevice.publicKey)}
-                className="mono"
-                title="the device key this machine holds"
-              />
-            </div>
-            {thisDevice.authorised ? (
-              <span className="chip chip-water">may write</span>
-            ) : thisDevice.revoked ? (
-              <span className="chip chip-silt">revoked</span>
-            ) : (
-              <button
-                className="btn btn-primary"
-                onClick={() => {
-                  void window.river
-                    .authoriseThisDevice("this machine")
-                    .then(() => notify("This machine may now write on its own chain"))
-                    .catch((cause: Error) => notify(cause.message));
-                }}
-              >
-                let it write
-              </button>
-            )}
-          </div>
-        )}
-
-        {devices
-          .filter((device) => device.device !== thisDevice?.publicKey)
-          .map((device) => (
-            <div
-              key={device.device}
-              style={{
-                display: "grid",
-                gridTemplateColumns: "1fr auto auto",
-                gap: 10,
-                alignItems: "center",
-                padding: "10px 0 0",
-                borderTop: "1px dotted var(--line)",
-              }}
-            >
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: 12.5 }}>{device.name || "unnamed device"}</div>
-                <Copyable
-                  value={device.device}
-                  label={shortAddr(device.device)}
-                  className="mono"
-                  title={device.device}
+          <TabsContent value="profile" className="mt-4 space-y-4">
+            <Card className="border-border/70 bg-card/40">
+              <CardHeader className="px-4 py-3">
+                <CardTitle className="text-sm">Your profile</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3 px-4 pb-4">
+                <Input
+                  value={draftName}
+                  onChange={(event) => setDraftName(event.target.value)}
+                  placeholder="Your name"
+                  aria-label="Your name"
+                  maxLength={32}
                 />
-              </div>
-              {device.revoked ? (
-                <span className="chip chip-silt">revoked</span>
-              ) : (
-                <span className="chip chip-water">may write</span>
-              )}
-              {!device.revoked && (
-                <button
-                  className="btn btn-danger"
-                  style={{ fontSize: 11 }}
-                  onClick={() => {
-                    void window.river
-                      .revokeDevice(device.device)
-                      .then(() => {
-                        load();
-                        notify("Revoked — its past stays, its future stops");
-                      })
-                      .catch((cause: Error) => notify(cause.message));
-                  }}
-                >
-                  revoke
-                </button>
-              )}
-            </div>
-          ))}
-      </section>
+                <Input
+                  value={draftBio}
+                  onChange={(event) => setDraftBio(event.target.value)}
+                  placeholder="A line about you (optional)"
+                  aria-label="Your bio"
+                  maxLength={160}
+                />
+                <Button disabled={saving || !draftName.trim()} onClick={() => void saveProfile()}>
+                  {saving ? "saving…" : "Save"}
+                </Button>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  Your name is written into your chain, so it cannot be taken away — and it cannot be
+                  quietly changed either. Your old name stays where it was.
+                </p>
+              </CardContent>
+            </Card>
+          </TabsContent>
 
-      <section className="panel" style={{ marginTop: 14, padding: "14px 16px" }}>
-        <div className="label" style={{ marginBottom: 8 }}>
-          What you do not see
-        </div>
-        <p className="serif" style={{ fontSize: 13, lineHeight: 1.6, color: "var(--ink-dim)" }}>
-          Your choices, kept on this machine and sent nowhere. A mute quiets somebody, a block
-          removes them from your feed, a filter hides any post containing a word. Nothing is
-          deleted anywhere — their history stays on the network.
-        </p>
+          <TabsContent value="keys" className="mt-4 space-y-4">
+            <Card className="border-border/70 bg-card/40">
+              <CardHeader className="px-4 py-3">
+                <CardTitle className="text-sm">Your key</CardTitle>
+              </CardHeader>
+              <CardContent className="px-4 pb-4">
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  It lives in this machine&apos;s keychain, and it never leaves. Everything you write
+                  is signed with it, and everything you write stays.
+                </p>
+                <div className="mt-3">
+                  <Copyable
+                    value={identity.publicKey}
+                    label={shortAddr(identity.publicKey)}
+                    className="mono text-xs text-muted-foreground"
+                    title={identity.publicKey}
+                  />
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {identity.protected
+                    ? "Sealed by the operating system"
+                    : "Held in the clear on this machine"}
+                </p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  <Button size="sm" variant="outline" onClick={() => void backup()}>
+                    <Download className="size-4" />
+                    Back up key
+                  </Button>
+                </div>
+                <div className="mt-3 flex gap-2">
+                  <Input
+                    value={secret}
+                    onChange={(event) => setSecret(event.target.value)}
+                    placeholder="Paste a 64-character private key"
+                    className="mono text-xs"
+                  />
+                  <Button size="sm" variant="outline" onClick={() => void restore()}>
+                    <Upload className="size-4" />
+                    Restore
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
 
-        {moderation.muted.length === 0 &&
-          moderation.blocked.length === 0 &&
-          moderation.filters.length === 0 && (
-            <p className="meta" style={{ fontSize: 11.5, marginTop: 10 }}>
-              You have hidden nobody and nothing.
-            </p>
-          )}
+            <Card className="border-border/70 bg-card/40">
+              <CardHeader className="px-4 py-3">
+                <CardTitle className="text-sm">Wallet</CardTitle>
+              </CardHeader>
+              <CardContent className="px-4 pb-4">
+                <WalletPanel
+                  wallet={wallet}
+                  onConnect={onConnectWallet}
+                  onDisconnect={onDisconnectWallet}
+                  notify={notify}
+                />
+                <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+                  A wallet is another way to hold the same authority — MetaMask, a hardware box,
+                  anything that speaks EIP-1193. It is optional; the key above works on its own.
+                </p>
+              </CardContent>
+            </Card>
 
-        {moderation.blocked.map((target) => (
-          <div
-            key={`block-${target}`}
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr auto auto",
-              gap: 10,
-              alignItems: "center",
-              padding: "8px 0 0",
-              borderTop: "1px dotted var(--line)",
-            }}
-          >
-            <span className="mono" style={{ fontSize: 11 }}>
-              {shortAddr(target)}
-            </span>
-            <span className="chip chip-silt">blocked</span>
-            <button
-              className="btn btn-ghost"
-              style={{ fontSize: 11 }}
-              onClick={() => {
-                void window.river.unblock(target).then(() => {
-                  load();
-                  notify("Unblocked — their posts are back");
-                });
-              }}
-            >
-              unblock
-            </button>
-          </div>
-        ))}
+            <Card className="border-border/70 bg-card/40">
+              <CardHeader className="px-4 py-3">
+                <CardTitle className="text-sm">Writing as</CardTitle>
+              </CardHeader>
+              <CardContent className="px-4 pb-4">
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  Posts are signed by the key you pick here. A device writes into its own chain, so
+                  the history of your identity never forks.
+                </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant={writer === "" ? "default" : "outline"}
+                    className="rounded-full"
+                    onClick={() => onWriter("")}
+                  >
+                    root key
+                  </Button>
+                  {local
+                    .filter((device) => !device.revoked)
+                    .map((device) => (
+                      <Button
+                        key={device.device}
+                        size="sm"
+                        variant={writer === device.device ? "default" : "outline"}
+                        className="rounded-full"
+                        onClick={() => onWriter(device.device)}
+                        title={device.device}
+                      >
+                        {device.name || shortAddr(device.device)}
+                      </Button>
+                    ))}
+                </div>
+              </CardContent>
+            </Card>
+          </TabsContent>
 
-        {moderation.muted.map((target) => (
-          <div
-            key={`mute-${target}`}
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr auto auto",
-              gap: 10,
-              alignItems: "center",
-              padding: "8px 0 0",
-              borderTop: "1px dotted var(--line)",
-            }}
-          >
-            <span className="mono" style={{ fontSize: 11 }}>
-              {shortAddr(target)}
-            </span>
-            <span className="chip">muted</span>
-            <button
-              className="btn btn-ghost"
-              style={{ fontSize: 11 }}
-              onClick={() => {
-                void window.river.unmute(target).then(() => {
-                  load();
-                  notify("Unmuted");
-                });
-              }}
-            >
-              unmute
-            </button>
-          </div>
-        ))}
+          <TabsContent value="devices" className="mt-4">
+            <Card className="border-border/70 bg-card/40">
+              <CardHeader className="px-4 py-3">
+                <CardTitle className="text-sm">Devices</CardTitle>
+              </CardHeader>
+              <CardContent className="px-4 pb-4">
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  One identity, many machines. Each keeps its own chain, so a phone and a laptop
+                  never fork your history — and a machine you no longer trust can be revoked without
+                  touching the past.
+                </p>
 
-        {moderation.filters.map((word) => (
-          <div
-            key={`filter-${word}`}
-            style={{
-              display: "grid",
-              gridTemplateColumns: "1fr auto auto",
-              gap: 10,
-              alignItems: "center",
-              padding: "8px 0 0",
-              borderTop: "1px dotted var(--line)",
-            }}
-          >
-            <span className="serif" style={{ fontSize: 13 }}>
-              “{word}”
-            </span>
-            <span className="chip">hidden</span>
-            <button
-              className="btn btn-ghost"
-              style={{ fontSize: 11 }}
-              onClick={() => {
-                void window.river.removeFilter(word).then(() => {
-                  load();
-                  notify("Filter removed");
-                });
-              }}
-            >
-              show again
-            </button>
-          </div>
-        ))}
-      </section>
+                {thisDevice && (
+                  <div className="mt-4 flex items-center gap-3 border-t border-border/50 pt-3">
+                    <Smartphone className="size-4 shrink-0 text-muted-foreground" />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm">this machine</div>
+                      <Copyable
+                        value={thisDevice.publicKey}
+                        label={shortAddr(thisDevice.publicKey)}
+                        className="mono text-xs text-muted-foreground"
+                        title="the device key this machine holds"
+                      />
+                    </div>
+                    {thisDevice.authorised ? (
+                      <Badge className="h-5 border-primary/40 bg-primary/10 px-1.5 text-[10px] text-primary">
+                        may write
+                      </Badge>
+                    ) : thisDevice.revoked ? (
+                      <Badge variant="secondary" className="h-5 px-1.5 text-[10px]">
+                        revoked
+                      </Badge>
+                    ) : (
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          void window.river
+                            .authoriseThisDevice("this machine")
+                            .then(() => {
+                              load();
+                              notify("This machine may now write on its own chain");
+                            })
+                            .catch((cause: Error) => notify(cause.message));
+                        }}
+                      >
+                        Let it write
+                      </Button>
+                    )}
+                  </div>
+                )}
 
-      <section className="panel" style={{ marginTop: 14, padding: "14px 16px" }}>
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "baseline",
-            marginBottom: 8,
-          }}
-        >
-          <span className="label">What happened to you</span>
-          <span className="meta" style={{ fontSize: 10 }}>
-            {notifications.length ? `${notifications.length} recent` : "nothing yet"}
-          </span>
-        </div>
-        {notifications.length === 0 && (
-          <p className="meta" style={{ fontSize: 11.5 }}>
-            No replies, ripples or follows yet.
-          </p>
-        )}
-        {notifications.slice(0, 10).map((note) => (
-          <div
-            key={note.id}
-            style={{
-              display: "grid",
-              gridTemplateColumns: "auto 1fr auto",
-              gap: 10,
-              padding: "6px 0",
-              borderTop: "1px dotted var(--line)",
-              fontSize: 12,
-              alignItems: "baseline",
-            }}
-          >
-            <span className="label" style={{ fontSize: 9 }}>
-              {note.kind}
-            </span>
-            <span className="meta">{shortAddr(note.actor)}</span>
-            <span className="meta" style={{ fontSize: 10 }}>
-              {new Date(note.createdAt).toLocaleDateString()}
-            </span>
-          </div>
-        ))}
-        {snapshot.unread > 0 && (
-          <button
-            className="btn btn-ghost"
-            style={{ marginTop: 8, fontSize: 11 }}
-            onClick={() => {
-              void window.river.markRead().then(() => {
-                setNotifications([]);
-                notify("Marked read");
-              });
-            }}
-          >
-            mark read
-          </button>
-        )}
-      </section>
+                {local
+                  .filter((device) => device.device !== thisDevice?.publicKey)
+                  .map((device) => (
+                    <div
+                      key={device.device}
+                      className="flex items-center gap-3 border-t border-border/50 py-3"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="text-sm">{device.name || "unnamed device"}</div>
+                        <Copyable
+                          value={device.device}
+                          label={shortAddr(device.device)}
+                          className="mono text-xs text-muted-foreground"
+                          title={device.device}
+                        />
+                      </div>
+                      {device.revoked ? (
+                        <Badge variant="secondary" className="h-5 px-1.5 text-[10px]">
+                          revoked
+                        </Badge>
+                      ) : (
+                        <Badge className="h-5 border-primary/40 bg-primary/10 px-1.5 text-[10px] text-primary">
+                          may write
+                        </Badge>
+                      )}
+                      {!device.revoked && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-8 px-2 text-xs text-muted-foreground"
+                          onClick={() => {
+                            void window.river
+                              .revokeDevice(device.device)
+                              .then(() => {
+                                load();
+                                notify("Revoked — its past stays, its future stops");
+                              })
+                              .catch((cause: Error) => notify(cause.message));
+                          }}
+                        >
+                          Revoke
+                        </Button>
+                      )}
+                    </div>
+                  ))}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="hidden" className="mt-4">
+            <Card className="border-border/70 bg-card/40">
+              <CardHeader className="px-4 py-3">
+                <CardTitle className="text-sm">What you do not see</CardTitle>
+              </CardHeader>
+              <CardContent className="px-4 pb-4">
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  Your choices, kept on this machine and sent nowhere. A mute quiets somebody, a
+                  block removes them from your feed, a filter hides any post containing a word.
+                  Nothing is deleted anywhere — their history stays on the network.
+                </p>
+
+                {moderation.muted.length === 0 &&
+                  moderation.blocked.length === 0 &&
+                  moderation.filters.length === 0 && (
+                    <p className="mt-3 text-xs text-muted-foreground">
+                      You have hidden nobody and nothing.
+                    </p>
+                  )}
+
+                {moderation.blocked.map((target) => (
+                  <div
+                    key={`block-${target}`}
+                    className="flex items-center gap-3 border-t border-border/50 py-2.5 text-sm"
+                  >
+                    <Ban className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="mono min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                      {shortAddr(target)}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-8 px-2 text-xs"
+                      onClick={() => {
+                        void window.river.unblock(target).then(() => {
+                          load();
+                          notify("Unblocked — their posts are back");
+                        });
+                      }}
+                    >
+                      Unblock
+                    </Button>
+                  </div>
+                ))}
+
+                {moderation.muted.map((target) => (
+                  <div
+                    key={`mute-${target}`}
+                    className="flex items-center gap-3 border-t border-border/50 py-2.5 text-sm"
+                  >
+                    <EyeOff className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="mono min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                      {shortAddr(target)}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-8 px-2 text-xs"
+                      onClick={() => {
+                        void window.river.unmute(target).then(() => {
+                          load();
+                          notify("Unmuted");
+                        });
+                      }}
+                    >
+                      Unmute
+                    </Button>
+                  </div>
+                ))}
+
+                {moderation.filters.map((word) => (
+                  <div
+                    key={`filter-${word}`}
+                    className="flex items-center gap-3 border-t border-border/50 py-2.5 text-sm"
+                  >
+                    <EyeOff className="size-4 shrink-0 text-muted-foreground" />
+                    <span className="min-w-0 flex-1 truncate font-serif">“{word}”</span>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-8 px-2 text-xs"
+                      onClick={() => {
+                        void window.river.removeFilter(word).then(() => {
+                          load();
+                          notify("Filter removed");
+                        });
+                      }}
+                    >
+                      Show again
+                    </Button>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          </TabsContent>
+
+          <TabsContent value="activity" className="mt-4">
+            <Card className="border-border/70 bg-card/40">
+              <CardHeader className="px-4 py-3">
+                <CardTitle className="text-sm">What happened to you</CardTitle>
+              </CardHeader>
+              <CardContent className="px-4 pb-4">
+                {notifications.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    No replies, ripples or follows yet.
+                  </p>
+                ) : (
+                  notifications.slice(0, 12).map((note) => (
+                    <div
+                      key={note.id}
+                      className="flex items-baseline gap-3 border-t border-border/50 py-2 text-sm first:border-t-0"
+                    >
+                      <Bell className="size-3.5 shrink-0 text-muted-foreground" />
+                      <span className="label text-[9px]">{note.kind}</span>
+                      <span className="mono min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                        {shortAddr(note.actor)}
+                      </span>
+                      <span className="shrink-0 text-[11px] text-muted-foreground">
+                        {new Date(note.createdAt).toLocaleDateString()}
+                      </span>
+                    </div>
+                  ))
+                )}
+                {snapshot.unread > 0 && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    className="mt-3 h-8 px-2 text-xs"
+                    onClick={() => {
+                      void window.river.markRead().then(() => {
+                        setNotifications([]);
+                        notify("Marked read");
+                      });
+                    }}
+                  >
+                    Mark read
+                  </Button>
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+        </Tabs>
+      </div>
     </>
   );
 }
