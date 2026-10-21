@@ -20,6 +20,7 @@ import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
 import { cleanText, createEvent, eventId, LIMITS } from "../core/events";
+import { openDm, sealDm } from "../core/dm";
 import { formatSiwe, signatureBytes, verifySiwe } from "../core/eth";
 import { fromHex, toHex } from "../core/canonical";
 import { checkpointPayload, merkleRoot, verifyMerkleProof, type Checkpoint } from "../core/merkle";
@@ -31,6 +32,8 @@ import type {
 } from "../core/wire";
 import type {
   DeviceView,
+  DmConversation,
+  DmMessageView,
   Event,
   EventBody,
   EventDraftView,
@@ -45,7 +48,7 @@ import { loadOrCreatePeerIdentity, type PeerIdentity } from "./peer-identity";
 import { loadOrCreateDeviceIdentity, type DeviceIdentity } from "./device-identity";
 import { loadOrCreateDataKey } from "./data-key";
 import { globalTopic, shardTopics } from "../core/topics";
-import { Store } from "./store";
+import { Store, type DmRow } from "./store";
 import { PeerServer, type Connection, type DhtStatus } from "./transport";
 
 export interface NodeOptions {
@@ -894,6 +897,100 @@ export class RiverNode extends EventEmitter {
     return this.store.devicesFor(this.identity.publicKey);
   }
 
+  // ------------------------------------------------------------------- chat
+
+  /**
+   * Send a direct message. The words are sealed twice — once for the person it
+   * is for, once for the sender's own archive — and both envelopes ride the
+   * same event. Neither can be opened by anyone else, including the peers that
+   * relay it, and the conversation stays readable from either side.
+   */
+  async sendDm(to: string, text: string): Promise<Event> {
+    const words = cleanText(text);
+    if (!words) throw new Error("a message needs words");
+    if (words.length > LIMITS.text) {
+      throw new Error(`messages are limited to ${LIMITS.text} characters`);
+    }
+    if (!/^[0-9a-f]{64}$/.test(to)) throw new Error("that is not a public key");
+    if (to === this.identity.publicKey) throw new Error("you cannot message yourself");
+
+    return this.publish("dm", {
+      to,
+      sealed: await sealDm(to, this.identity.privateKey, words),
+      copy: await sealDm(this.identity.publicKey, this.identity.privateKey, words),
+    });
+  }
+
+  /** Open one stored row: our own copy if we wrote it, the envelope if it is for us. */
+  private async openDmRow(row: DmRow): Promise<string | null> {
+    let body: EventBody;
+    try {
+      body = JSON.parse(row.body) as EventBody;
+    } catch {
+      return null;
+    }
+    const envelope =
+      row.author === this.identity.publicKey ? (body.copy ?? body.sealed) : body.sealed;
+    if (!envelope) return null;
+    return openDm(envelope, this.identity.privateKey);
+  }
+
+  /** One conversation, oldest message first. */
+  async dmThread(peer: string, limit = 500): Promise<DmMessageView[]> {
+    const me = this.identity.publicKey;
+    const rows = this.store.dmThread(me, peer, limit);
+    const out: DmMessageView[] = [];
+    for (const row of rows) {
+      out.push({
+        id: row.id,
+        author: row.author,
+        recipient: row.recipient,
+        peer,
+        text: await this.openDmRow(row),
+        createdAt: row.created_at,
+        seq: row.seq,
+        mine: row.author === me,
+        read: row.read_at !== null,
+      });
+    }
+    return out;
+  }
+
+  /** Every conversation, most recent first, with a readable preview. */
+  async dmConversations(limit = 100): Promise<DmConversation[]> {
+    const me = this.identity.publicKey;
+    const partners = this.store.dmPartners(me, limit);
+    const out: DmConversation[] = [];
+    for (const partner of partners) {
+      const last = this.store.lastDm(me, partner.peer);
+      out.push({
+        peer: partner.peer,
+        lastAt: partner.lastAt,
+        lastText: last ? await this.openDmRow(last) : null,
+        lastMine: last?.author === me,
+        unread: partner.unread,
+        total: partner.total,
+      });
+    }
+    return out;
+  }
+
+  /** How many messages are waiting to be read. */
+  dmUnread(): number {
+    return this.store.dmUnread(this.identity.publicKey);
+  }
+
+  /** Everything one person sent us is now read. */
+  markDmRead(peer: string): void {
+    this.store.markDmsRead(this.identity.publicKey, peer);
+    this.emit("update", "chat");
+  }
+
+  /** The timeline: every post and reply, newest first, straight through. */
+  timeline(options: { limit?: number; before?: { createdAt: number; id: string } | null } = {}) {
+    return this.store.timeline({ ...options, viewer: this.identity.publicKey });
+  }
+
   snapshot(includeSilt = false): Snapshot {
     const pubkey = this.identity.publicKey;
     const meProfile = this.store.profile(pubkey);
@@ -903,6 +1000,8 @@ export class RiverNode extends EventEmitter {
     const authors = new Set<string>([pubkey]);
     for (const post of [...feed.top, ...feed.replies]) authors.add(post.author);
     for (const target of this.store.following(pubkey)) authors.add(target);
+    // People you are chatting with have names in the conversation list too.
+    for (const partner of this.store.dmPartners(pubkey, 50)) authors.add(partner.peer);
 
     return {
       me: {

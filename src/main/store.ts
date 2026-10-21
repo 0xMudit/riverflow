@@ -37,11 +37,23 @@ import type {
   ProfileView,
   Stats,
   ThreadView,
+  TimelinePage,
   VerifyReport,
 } from "../core/types";
 import { ZERO_HASH } from "../core/canonical";
 
 type Row = Record<string, unknown>;
+
+/** A stored direct message. `body` holds envelopes, never words. */
+export interface DmRow {
+  id: string;
+  author: string;
+  recipient: string;
+  seq: number;
+  created_at: number;
+  body: string;
+  read_at: number | null;
+}
 
 /** What SQLite will take as a bound parameter. */
 type SqlParam = string | number | null | Uint8Array;
@@ -243,6 +255,18 @@ CREATE TABLE IF NOT EXISTS wanted (
   at     INTEGER NOT NULL,
   PRIMARY KEY (author, device)
 );
+
+-- Direct messages. The body holds sealed envelopes only: this table never
+-- contains a word that was typed, even if the data key is missing.
+CREATE TABLE IF NOT EXISTS dms (
+  id         TEXT PRIMARY KEY,
+  author     TEXT NOT NULL,
+  recipient  TEXT NOT NULL,
+  seq        INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  body       TEXT NOT NULL,
+  read_at    INTEGER
+);
 `;
 
 /**
@@ -255,6 +279,8 @@ CREATE INDEX IF NOT EXISTS events_chain ON events(author, device, seq);
 CREATE INDEX IF NOT EXISTS events_kind ON events(kind);
 CREATE INDEX IF NOT EXISTS events_received ON events(received_at DESC);
 CREATE INDEX IF NOT EXISTS checkpoints_author ON checkpoints(author, device, seq DESC);
+CREATE INDEX IF NOT EXISTS dms_from ON dms(author, created_at DESC);
+CREATE INDEX IF NOT EXISTS dms_to ON dms(recipient, created_at DESC);
 `;
 
 export interface FeedOptions {
@@ -826,6 +852,24 @@ export class Store {
         break;
       }
 
+      case "dm": {
+        // The body is envelopes, sealed by the author. It is stored as it
+        // arrived, under the data key like everything else, and opened only
+        // when this machine is one of the two people in the conversation.
+        this.run(
+          `INSERT INTO dms (id, author, recipient, seq, created_at, body)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO NOTHING`,
+          event.id,
+          event.author,
+          body.to ?? "",
+          event.seq,
+          event.createdAt,
+          this.seal(JSON.stringify(body), "dms.body"),
+        );
+        break;
+      }
+
       case "device": {
         this.run(
           `INSERT INTO devices (author, device, name, seq, revoked, created_at) VALUES (?, ?, ?, ?, ?, ?)
@@ -1238,6 +1282,56 @@ export class Store {
     return { top, replies: repliesOut, next };
   }
 
+  /**
+   * The timeline: every post, reply and ripple's subject in one line, newest
+   * first. The feed is curated — top-level posts with their threads beneath.
+   * The timeline is not: it is what happened, in the order it happened, which
+   * is what a news feed is actually pretending to be.
+   */
+  timeline(options: FeedOptions = {}): TimelinePage {
+    const limit = Math.min(Math.max(options.limit ?? 40, 1), 200);
+    const silt = options.includeSilt ? 1 : 0;
+    const viewer = options.viewer ?? "";
+
+    const rows = options.before
+      ? this.all<Row>(
+          `SELECT p.*, EXISTS(SELECT 1 FROM reactions r WHERE r.post_id = p.id AND r.author = ?) AS mine
+           FROM posts p
+           WHERE (? = 1 OR p.retracted_at IS NULL)
+             AND p.author NOT IN (SELECT target FROM mutes)
+             AND p.author NOT IN (SELECT target FROM blocklist)
+             AND (p.created_at < ? OR (p.created_at = ? AND p.id < ?))
+           ORDER BY p.created_at DESC, p.id DESC
+           LIMIT ?`,
+          viewer,
+          silt,
+          options.before.createdAt,
+          options.before.createdAt,
+          options.before.id,
+          limit,
+        )
+      : this.all<Row>(
+          `SELECT p.*, EXISTS(SELECT 1 FROM reactions r WHERE r.post_id = p.id AND r.author = ?) AS mine
+           FROM posts p
+           WHERE (? = 1 OR p.retracted_at IS NULL)
+             AND p.author NOT IN (SELECT target FROM mutes)
+             AND p.author NOT IN (SELECT target FROM blocklist)
+           ORDER BY p.created_at DESC, p.id DESC
+           LIMIT ?`,
+          viewer,
+          silt,
+          limit,
+        );
+
+    const posts = rows.map(toPostView).filter((post) => !this.filtered(post.text));
+    const last = rows[rows.length - 1];
+    const next =
+      rows.length === limit && last
+        ? { createdAt: Number(last.created_at), id: String(last.id) }
+        : null;
+    return { posts, next };
+  }
+
   /** One thread: the root and everything beneath it, oldest first. */
   thread(postId: string, options: { includeSilt?: boolean; viewer?: string } = {}): ThreadView {
     const viewer = options.viewer ?? "";
@@ -1309,6 +1403,95 @@ export class Store {
       .filter((post) => !this.filtered(post.text))
       .filter((post) => post.text.toLowerCase().includes(text))
       .slice(0, limit);
+  }
+
+  // ---------------------------------------------------------------- chat
+
+  /**
+   * The messages between the viewer and one other person. The stored `body` is
+   * still sealed to those two people; the node opens it, never the store.
+   */
+  dmThread(me: string, peer: string, limit = 500): DmRow[] {
+    return this.all<DmRow>(
+      `SELECT * FROM dms
+       WHERE (author = ? AND recipient = ?) OR (author = ? AND recipient = ?)
+       ORDER BY created_at ASC, id ASC
+       LIMIT ?`,
+      me,
+      peer,
+      peer,
+      me,
+      limit,
+    );
+  }
+
+  /** Everyone the viewer has exchanged messages with, most recent first. */
+  dmPartners(me: string, limit = 100): Array<{ peer: string; lastAt: number; unread: number; total: number }> {
+    return this.all<{ peer: string; lastAt: number; unread: number; total: number }>(
+      `SELECT peer, MAX(created_at) AS lastAt, SUM(unread) AS unread, COUNT(*) AS total FROM (
+         SELECT CASE WHEN author = ? THEN recipient ELSE author END AS peer,
+                created_at,
+                CASE WHEN recipient = ? AND read_at IS NULL THEN 1 ELSE 0 END AS unread
+         FROM dms
+         WHERE author = ? OR recipient = ?
+       )
+       GROUP BY peer
+       ORDER BY lastAt DESC
+       LIMIT ?`,
+      me,
+      me,
+      me,
+      me,
+      limit,
+    );
+  }
+
+  /** The most recent message with one person, for the conversation list. */
+  lastDm(me: string, peer: string): DmRow | null {
+    return this.one<DmRow>(
+      `SELECT * FROM dms
+       WHERE (author = ? AND recipient = ?) OR (author = ? AND recipient = ?)
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+      me,
+      peer,
+      peer,
+      me,
+    );
+  }
+
+  /** How many messages for the viewer are still unread. */
+  dmUnread(me: string): number {
+    const row = this.one<{ n: number }>(
+      "SELECT COUNT(*) AS n FROM dms WHERE recipient = ? AND read_at IS NULL",
+      me,
+    );
+    return row?.n ?? 0;
+  }
+
+  /** Mark everything one person sent the viewer as read. */
+  markDmsRead(me: string, peer: string, at = Date.now()): void {
+    this.run(
+      "UPDATE dms SET read_at = ? WHERE recipient = ? AND author = ? AND read_at IS NULL",
+      at,
+      me,
+      peer,
+    );
+  }
+
+  /** Is this person already in a conversation with the viewer? */
+  hasDmWith(a: string, b: string): boolean {
+    return (
+      this.one<{ ok: number }>(
+        `SELECT 1 AS ok FROM dms
+         WHERE (author = ? AND recipient = ?) OR (author = ? AND recipient = ?)
+         LIMIT 1`,
+        a,
+        b,
+        b,
+        a,
+      ) !== null
+    );
   }
 
   // ----------------------------------------------------------- notifications

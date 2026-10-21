@@ -8,6 +8,7 @@
  */
 import { canonical, fromHex, sha256Hex, ZERO_HASH } from "./canonical";
 import { sign, verify } from "./crypto";
+import { isEnvelope, MAX_ENVELOPE } from "./dm";
 import { ETH_ADDRESS, signatureBytes, verifyPersonalSignature } from "./eth";
 import type { Event, EventBody, EventKind } from "./types";
 
